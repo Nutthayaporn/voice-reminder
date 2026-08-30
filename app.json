@@ -1,17 +1,25 @@
 {
   "expo": {
-    "name": "voice-reminder",
+    "name": "Voice Reminder",
     "slug": "voice-reminder",
+    "scheme": "voicereminder",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.spyrocash.voicereminder",
+      "infoPlist": {
+        "UIBackgroundModes": ["audio"],
+        "LSApplicationQueriesSchemes": ["dailybudget"]
+      }
     },
     "android": {
+      "package": "com.spyrocash.voicereminder",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#0B1120",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -20,6 +28,28 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "ใช้ไมโครโฟนเพื่อฟังคำสั่งเสียงและบันทึกรายการให้คุณ"
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "ใช้ไมโครโฟนเพื่อฟังคำสั่งเสียง",
+          "speechRecognitionPermission": "ใช้เพื่อถอดเสียงพูดของคุณเป็นข้อความในเครื่อง",
+          "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#38BDF8"
+        }
+      ]
+    ]
   }
 }
