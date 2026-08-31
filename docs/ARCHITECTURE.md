@@ -113,29 +113,31 @@ store (ทับ speak_back เพราะเป็น data-driven), `record_ex
 
 ## 4. Phase 2 — Data model + การเตือน
 
-> **สถานะ: ทำแล้ว (แบบ local-first)** — เก็บด้วย zustand + AsyncStorage ใน
+> **สถานะ: ทำแล้ว (local-first + optional cloud sync)** — เก็บด้วย zustand + AsyncStorage ใน
 > `src/store/useStore.ts` (record = `Item` ใน `src/store/types.ts`), แปลงจาก intent
 > ด้วย `src/brain/toItem.ts`, ตั้งเตือนด้วย `expo-notifications` ใน `src/notify/`.
-> **Supabase cloud sync ยังไม่ทำ** — ตั้งใจ defer เพื่อให้ใช้งานเครื่องเดียวได้ทันที
-> โดยไม่ต้องมี account; schema ของ store ออกแบบให้ map ตรงกับตาราง Supabase ข้างล่างเมื่อ
-> พร้อมทำ sync. **การเตือนจริงต้อง dev build** (Expo Go จะ save ได้แต่ไม่ยิงเตือน)
+> Cloud sync ใช้ optional Supabase client + email OTP, persisted offline write queue,
+> soft delete, Realtime/foreground pull และ last-write-wins ด้วย `updated_at`. ดู
+> `src/store/cloud.ts`, `src/store/useStore.ts` และ `supabase/migrations/`. ถ้าไม่ตั้ง env หรือ
+> ไม่ sign in จะเป็น local-only เหมือนเดิม. **การเตือนจริงต้อง dev build**
+> (Expo Go จะ save ได้แต่ไม่ยิงเตือน)
 
 ตัดสินใจใช้ **ตารางเดียว `items`** แยกชนิดด้วยคอลัมน์ `type` (ตามที่เจ้าของแอปเลือก —
-ไม่แยกตาราง holidays; วันหยุดก็คือ item ชนิดหนึ่ง) โครงที่เสนอ (สำหรับ Supabase sync):
+ไม่แยกตาราง holidays; วันหยุดก็คือ item ชนิดหนึ่ง). Schema จริงพร้อม RLS/LWW functions อยู่ที่
+`supabase/migrations/20260831000000_items_sync.sql`; `notificationIds` ไม่ขึ้น cloud เพราะแต่ละ
+เครื่องต้อง schedule/cancel notification ของตัวเอง
 
 ```sql
 create table items (
-  id          uuid primary key default gen_random_uuid(),
+  id          text not null,           -- รองรับ ID ของ local records เดิม
   user_id     uuid references auth.users,
-  type        text not null,          -- 'reminder' | 'event' | 'note'
+  type        text not null,           -- reminder/event/todo/note
   title       text not null,
-  body        text,
-  start_at    timestamptz,            -- เวลาเกิด/เริ่ม
-  end_at      timestamptz,            -- ช่วง (เช่น 1–2 Sep)
-  recurrence  jsonb,                  -- {freq, byday, ...} ว่าง = ครั้งเดียว
-  notify_at   timestamptz,           -- รอบเตือนถัดไป
-  done        boolean default false,
-  created_at  timestamptz default now()
+  start_at    timestamptz,
+  recurrence  jsonb,
+  updated_at  timestamptz not null,    -- LWW conflict key
+  deleted_at  timestamptz,             -- soft-delete tombstone
+  primary key (user_id, id)
 );
 ```
 

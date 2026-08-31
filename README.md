@@ -73,6 +73,8 @@
 | `src/brain/toItem.ts` | แปลง action (create_*) → `Item` ที่บันทึกได้ (เก็บ raw_text + people) |
 | `src/brain/searchMemory.ts` | ค้นความทรงจำย้อนหลัง (LLM-as-retriever) "ลูกเริ่มพูดเมื่อไหร่" |
 | `src/store/useStore.ts` | store local-first (zustand + AsyncStorage) เก็บ `items` |
+| `src/store/cloud.ts` | map/push/pull/realtime items กับ Supabase (ไม่ sync notification IDs) |
+| `src/lib/supabase.ts` | optional Supabase client; env ว่างแล้วคืน local-only mode |
 | `src/store/query.ts` | ตอบคำถาม "วันนี้มีอะไร" จาก items ในเครื่อง |
 | `src/notify/scheduler.ts` | แปลง item.recurrence → local notification triggers |
 | `src/notify/setup.ts` | ตั้ง handler/permission/channel ของ notification |
@@ -120,6 +122,17 @@ npm run web:build    # export ไป dist/ + ผูก manifest/service worker
 ออฟไลน์ได้ และ items ยังเก็บแบบ local-first; การตั้งเตือนบน web ยังไม่รองรับ
 ในรอบนี้ (ต้องทำ Web Push แยก)
 
+### เปิด Cloud Sync ข้ามเครื่อง (ไม่บังคับ)
+
+1. Apply [`supabase/migrations/20260831000000_items_sync.sql`](supabase/migrations/20260831000000_items_sync.sql)
+   ใน Supabase SQL editor
+2. ตั้ง Email Template ให้ส่ง `{{ .Token }}` เป็น OTP 6 หลักตาม
+   [`supabase/README.md`](supabase/README.md)
+3. ใส่ `EXPO_PUBLIC_SUPABASE_URL` และ `EXPO_PUBLIC_SUPABASE_ANON_KEY` ใน `.env`
+
+จากนั้นกด **CONNECT** ในแผง Cloud Memory แล้วใช้อีเมลเดียวกันบนทุกเครื่อง. ถ้าไม่ตั้ง Supabase
+หรือยังไม่ sign in แอปยังทำงานและเก็บข้อมูลในเครื่องเหมือนเดิมทุกอย่าง
+
 ---
 
 ## Roadmap
@@ -132,7 +145,7 @@ npm run web:build    # export ไป dist/ + ผูก manifest/service worker
 | **3. Query** | ถาม "วันนี้มีอะไรทำบ้าง" แล้วค้น+สรุปตอบด้วยเสียง | ✅ ทำแล้ว (พื้นฐาน) |
 | **4. Integrate budget** | intent `add_expense` → deep link เปิดหน้าเพิ่มรายการของ daily-budget แบบกรอกให้พร้อม | ✅ ทำแล้ว |
 | **5. Web / PWA** | Browser STT, web guards, installable/offline app shell | ✅ ทำแล้ว |
-| **6. Supabase sync** | backup/sync items ข้ามเครื่องแบบ local-first | ⏳ ถัดไป |
+| **6. Supabase sync** | email OTP + offline queue + LWW/soft delete + Realtime | ✅ โค้ดพร้อม (ต้อง apply migration) |
 
 รายละเอียดเชิงลึก (สัญญาของ speech layer, schema ของ intent/ข้อมูล, แผน integrate) อยู่ที่
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)

@@ -30,6 +30,7 @@ import { initNotifications, ensureNotifyPermission } from './src/notify/setup';
 import { scheduleForItem, cancelNotifications } from './src/notify/scheduler';
 import { sendExpenseToDailyBudget } from './src/integrations/dailyBudget';
 import { bkkDateStr } from './src/lib/date';
+import { CloudSyncPanel } from './src/components/CloudSyncPanel';
 
 const HUD_HORIZONTAL_LINES = [86, 172, 258, 344, 430, 516, 602, 688] as const;
 const HUD_VERTICAL_LINES = [44, 132, 220, 308] as const;
@@ -57,6 +58,7 @@ export default function App() {
   const removeItem = useStore((state) => state.removeItem);
   const toggleDone = useStore((state) => state.toggleDone);
   const updateItem = useStore((state) => state.updateItem);
+  const bootstrapSync = useStore((state) => state.bootstrapSync);
 
   // Short-lived conversation memory: what the user can refer to next turn
   // ("อันแรก" / "อันเมื่อกี้") + a pending utterance awaiting clarification.
@@ -65,6 +67,10 @@ export default function App() {
   useEffect(() => {
     void initNotifications();
   }, []);
+
+  useEffect(() => {
+    if (hasHydrated) void bootstrapSync();
+  }, [bootstrapSync, hasHydrated]);
 
   // Apply an update_item action; reschedule notifications if the timing changed.
   const applyUpdate = useCallback(
@@ -322,6 +328,8 @@ export default function App() {
             </View>
           </View>
 
+          <CloudSyncPanel />
+
           <SectionHeader index="01" title="CONVERSATION STREAM" />
           <View style={styles.conversation}>
             {!last && !partial && !thinking && !plan && (
@@ -446,7 +454,7 @@ export default function App() {
             <Text style={styles.promptDivider}>/</Text>
             <Text style={styles.promptText}>“วันนี้มีอะไรต้องทำบ้าง”</Text>
           </View>
-          <Text style={styles.footer}>SECURE LOCAL MEMORY · ASIA/BANGKOK · VORA SYSTEM 01</Text>
+          <Text style={styles.footer}>LOCAL-FIRST MEMORY · ASIA/BANGKOK · VORA SYSTEM 01</Text>
         </ScrollView>
       </SafeAreaView>
     </SafeAreaProvider>

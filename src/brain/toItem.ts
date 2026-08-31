@@ -19,6 +19,7 @@ export function actionToItem(a: BrainAction, rawText?: string): Item | null {
   const type = TOOL_TO_TYPE[a.tool];
   if (!type) return null;
 
+  const now = new Date().toISOString();
   return {
     id: makeId(),
     type,
@@ -29,7 +30,8 @@ export function actionToItem(a: BrainAction, rawText?: string): Item | null {
     all_day: a.all_day,
     recurrence: a.recurrence,
     done: false,
-    created_at: new Date().toISOString(),
+    created_at: now,
+    updated_at: now,
     notificationIds: [],
     raw_text: rawText,
     people: a.people ?? undefined,

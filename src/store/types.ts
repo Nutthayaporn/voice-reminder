@@ -21,6 +21,8 @@ export interface Item {
   recurrence: Recurrence | null;
   done: boolean;
   created_at: string;
+  /** ISO timestamp of the last local edit; conflict key for cloud LWW merge. */
+  updated_at: string;
   /** ids returned by expo-notifications, kept so we can cancel on delete. */
   notificationIds: string[];
 

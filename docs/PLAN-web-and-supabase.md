@@ -146,9 +146,10 @@ create policy "items owner" on public.items
 - เปิด RLS + policy owner-only + trigger `updated_at`
 
 ### B3. Auth (ให้เบาที่สุด)
-- ทางเลือกแนะนำ: **Supabase anonymous sign-in** (`supabase.auth.signInAnonymously()`) เพื่อให้ได้
-  `user_id` โดยไม่ต้องมีหน้า login — เหมาะกับ voice-first. ต่อยอดเป็น email/OAuth ทีหลังได้
-- ถ้าต้องการผูกบัญชีจริง คัดลอกหน้า auth จาก daily-budget (`app/auth.tsx`)
+- ใช้ **email OTP 6 หลัก** (`signInWithOtp` + `verifyOtp`) เพื่อให้ผู้ใช้เข้า account เดิมบน
+  เครื่องอื่นได้โดยไม่ต้องจำ password และไม่ต้องทำ deep-link callback
+- ไม่ใช้ anonymous sign-in เพราะ anonymous user กลับเข้า user เดิมจากอีกเครื่องไม่ได้ จึงไม่ผ่าน
+  acceptance criteria เรื่อง sync ข้ามเครื่อง
 
 ### B4. Sync service
 สร้าง `src/store/cloud.ts` (มิเรอร์ daily-budget) + ต่อเข้ากับ `src/store/useStore.ts`:
