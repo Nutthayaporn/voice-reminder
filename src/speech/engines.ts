@@ -1,11 +1,28 @@
 // Describes the selectable STT engines and whether each can run right now,
 // so the toggle can label them and explain any that are unavailable.
 
+import { Platform } from 'react-native';
 import { isGroqConfigured } from '../config';
 import { isDeviceSttAvailable } from './deviceStt';
+import { isWebSttAvailable } from './webStt';
 import type { EngineInfo } from './types';
 
 export function getEngines(): EngineInfo[] {
+  if (Platform.OS === 'web') {
+    const webReady = isWebSttAvailable();
+    return [
+      {
+        id: 'web',
+        label: 'Browser',
+        hint: 'Web Speech API · Chrome/Edge รองรับภาษาไทย',
+        available: webReady,
+        unavailableReason: webReady
+          ? undefined
+          : 'เบราว์เซอร์นี้ไม่รองรับ Web Speech API (แนะนำ Chrome หรือ Edge)',
+      },
+    ];
+  }
+
   const groqReady = isGroqConfigured();
   const deviceReady = isDeviceSttAvailable();
 

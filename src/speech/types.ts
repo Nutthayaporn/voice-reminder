@@ -7,12 +7,13 @@
 //              needs network + an API key, works in Expo Go)
 //   'device' → on-device recognition via expo-speech-recognition (free,
 //              offline-capable, lower latency, needs a dev build)
+//   'web'    → the browser Web Speech API (Chrome/Edge, no audio upload)
 //
 // Text-to-speech is shared (expo-speech / native OS voice) for now; it is
 // modelled as its own piece so a cloud TTS voice can be slotted in later
 // without touching callers.
 
-export type SttEngineId = 'cloud' | 'device';
+export type SttEngineId = 'cloud' | 'device' | 'web';
 
 export type VoiceStatus =
   | 'idle'

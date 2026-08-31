@@ -10,6 +10,7 @@ import * as Notifications from 'expo-notifications';
 let initialised = false;
 
 export async function initNotifications(): Promise<void> {
+  if (Platform.OS === 'web') return;
   if (initialised) return;
   initialised = true;
 
@@ -37,6 +38,7 @@ export async function initNotifications(): Promise<void> {
 
 /** Request permission to post notifications. Returns whether granted. */
 export async function ensureNotifyPermission(): Promise<boolean> {
+  if (Platform.OS === 'web') return false;
   try {
     const current = await Notifications.getPermissionsAsync();
     if (current.granted) return true;

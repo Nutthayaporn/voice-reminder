@@ -27,7 +27,11 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro",
+      "output": "single",
+      "themeColor": "#02070C",
+      "backgroundColor": "#02070C"
     },
     "plugins": [
       [

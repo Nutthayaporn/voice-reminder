@@ -4,6 +4,7 @@
 // item is deleted. All guarded: in Expo Go (no native module) this no-ops and
 // returns [] — the item still saves, it just won't alarm until a dev build.
 
+import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { SchedulableTriggerInputTypes } from 'expo-notifications';
 
@@ -40,6 +41,7 @@ function bkkParts(iso: string): Parts {
 
 /** Schedule notifications for an item; returns the scheduled ids (may be []). */
 export async function scheduleForItem(item: Item): Promise<string[]> {
+  if (Platform.OS === 'web') return [];
   // Notes never alarm; anything without a time can't be scheduled.
   if (item.type === 'note' || !item.start_at) return [];
 
@@ -123,6 +125,7 @@ function weekdayCode(weekday: number): string[] {
 
 /** Cancel previously scheduled notifications for an item. */
 export async function cancelNotifications(ids: string[]): Promise<void> {
+  if (Platform.OS === 'web') return;
   for (const id of ids) {
     try {
       await Notifications.cancelScheduledNotificationAsync(id);

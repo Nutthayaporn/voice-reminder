@@ -20,6 +20,8 @@ implementation สลับได้ที่ runtime (ดู `src/speech/`)
     เป็น *batch* (ได้ผลตอนหยุดพูด ไม่มี partial) ทำงานใน Expo Go ได้
   - `device` (`deviceStt.ts` + `useVoiceInput.ts`): `expo-speech-recognition` แบบ *streaming*
     มี partial ระหว่างพูด ผลสุดท้ายมาทาง event `end` — **ต้อง dev build**
+  - `web` (`webStt.ts`): Web Speech API ของ browser แบบ streaming, ใช้ `th-TH`
+    และไม่อัปโหลดไฟล์เสียง; แสดงเฉพาะ Browser engine บน web
 - **สถานะ** เป็น state machine เล็ก ๆ: `idle → listening → transcribing → idle`
   (`transcribing` ใช้จริงเฉพาะ cloud เพราะต้องรออัพโหลด) — ดู `VoiceStatus` ใน `types.ts`
 - **TTS** (`tts.ts`) แยกเป็นชิ้นของตัวเอง วันนี้ใช้เสียง OS (ฟรี มีเสียงไทย) เปลี่ยนเป็น
@@ -180,3 +182,5 @@ iOS ต้องมี `dailybudget` ใน `LSApplicationQueriesSchemes` (ต�
 - notification trigger แบบ recurring (WEEKLY/DAILY) ใช้ **เวลาท้องถิ่นของเครื่อง** —
   โค้ดสมมติเครื่องอยู่ Asia/Bangkok. ถ้าจะรองรับข้าม timezone ต้องแปลงเพิ่ม
 - expo-notifications: **ต้อง dev build** ถึงจะยิงเตือนจริง; ใน Expo Go save ได้แต่ไม่เตือน
+- บน web ใช้ platform files (`*.web.ts`) ตัด `expo-notifications` และ native file uploader
+  ออกจาก bundle; items บันทึกได้แต่ยังไม่มี Web Push

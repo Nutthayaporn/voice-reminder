@@ -10,7 +10,7 @@
 // insert, or a daily-budget Edge Function that saves without confirmation) can
 // replace the deep link without touching callers.
 
-import { Linking } from 'react-native';
+import { Linking, Platform } from 'react-native';
 
 const SCHEME = 'dailybudget'; // daily-budget app.json → expo.scheme
 
@@ -31,6 +31,10 @@ export interface ExpenseHandoffResult {
 export async function sendExpenseToDailyBudget(
   p: ExpensePayload,
 ): Promise<ExpenseHandoffResult> {
+  if (Platform.OS === 'web') {
+    return { ok: false, appAvailable: false };
+  }
+
   const qs = new URLSearchParams();
   qs.set('amount', String(p.amount));
   qs.set('type', 'expense');

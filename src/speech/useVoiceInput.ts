@@ -11,6 +11,7 @@
 // so we keep the latest values in refs to read them from those callbacks.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Platform } from 'react-native';
 import {
   useAudioRecorder,
   RecordingPresets,
@@ -24,6 +25,7 @@ import {
   addSpeechListener,
   ensureDeviceSttPermission,
 } from './deviceStt';
+import { createWebStt, type WebSttSession } from './webStt';
 import type { SttEngineId, VoiceStatus, TranscriptResult } from './types';
 
 interface UseVoiceInputArgs {
@@ -47,6 +49,7 @@ export function useVoiceInput({ engine, onResult, onError }: UseVoiceInputArgs) 
 
   const startedAtRef = useRef(0);
   const deviceTextRef = useRef('');
+  const webSessionRef = useRef<WebSttSession | null>(null);
   const listeningRef = useRef(false); // guards double stop / stray end events
 
   const fail = useCallback((message: string) => {
@@ -138,18 +141,64 @@ export function useVoiceInput({ engine, onResult, onError }: UseVoiceInputArgs) 
     getSpeechModule()?.stop();
   }, []);
 
+  // ---- browser engine (Web Speech API) ---------------------------------
+  const startWeb = useCallback(async () => {
+    setPartial('');
+    startedAtRef.current = Date.now();
+
+    const session = createWebStt(config.locale, {
+      onPartial: (text) => {
+        if (engineRef.current === 'web' && listeningRef.current) setPartial(text);
+      },
+      onEnd: (text) => {
+        if (engineRef.current !== 'web' || !listeningRef.current) return;
+        webSessionRef.current = null;
+        finish(text, 'web');
+      },
+      onError: (message) => {
+        if (engineRef.current !== 'web' || !listeningRef.current) return;
+        webSessionRef.current = null;
+        fail(message);
+      },
+    });
+
+    if (!session) return fail('เบราว์เซอร์นี้ไม่รองรับ Web Speech API');
+
+    webSessionRef.current = session;
+    listeningRef.current = true;
+    setStatus('listening');
+    try {
+      session.start();
+    } catch (e: unknown) {
+      webSessionRef.current = null;
+      fail(e instanceof Error ? e.message : String(e));
+    }
+  }, [fail, finish]);
+
+  const stopWeb = useCallback(async () => {
+    setStatus('transcribing');
+    try {
+      webSessionRef.current?.stop();
+    } catch (e: unknown) {
+      webSessionRef.current = null;
+      fail(e instanceof Error ? e.message : String(e));
+    }
+  }, [fail]);
+
   // ---- public controls --------------------------------------------------
   const start = useCallback(async () => {
     if (listeningRef.current) return;
-    if (engine === 'cloud') await startCloud();
+    if (Platform.OS === 'web') await startWeb();
+    else if (engine === 'cloud') await startCloud();
     else await startDevice();
-  }, [engine, startCloud, startDevice]);
+  }, [engine, startCloud, startDevice, startWeb]);
 
   const stop = useCallback(async () => {
     if (!listeningRef.current) return;
-    if (engineRef.current === 'cloud') await stopCloud();
+    if (Platform.OS === 'web') await stopWeb();
+    else if (engineRef.current === 'cloud') await stopCloud();
     else await stopDevice();
-  }, [stopCloud, stopDevice]);
+  }, [stopCloud, stopDevice, stopWeb]);
 
   const toggle = useCallback(() => {
     if (listeningRef.current) void stop();
@@ -159,6 +208,9 @@ export function useVoiceInput({ engine, onResult, onError }: UseVoiceInputArgs) 
   // Abort any in-flight recognition if the screen goes away.
   useEffect(
     () => () => {
+      listeningRef.current = false;
+      webSessionRef.current?.abort();
+      webSessionRef.current = null;
       try {
         getSpeechModule()?.abort();
       } catch {

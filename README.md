@@ -4,9 +4,9 @@
 บันทึก และ **ตอบกลับด้วยเสียง** เกิดมาแก้ pain point เดียว: *อยากจดแต่ขี้เกียจพิมพ์เพราะมือ
 ไม่ว่าง*
 
-> สถานะปัจจุบัน: **Phase 0–4 เสร็จ (MVP ครบวง)** — พูด → เข้าใจ → บันทึก → เตือน → ตอบ
-> และต่อ daily-budget แล้ว. สมองอัปเกรดเป็น **Action Plan** (1 ประโยคทำได้หลายคำสั่ง) +
-> มี type `todo`. ดู roadmap ด้านล่าง
+> สถานะปัจจุบัน: **Phase 0–4 + Web/PWA เสร็จ** — พูด → เข้าใจ → บันทึก → เตือน → ตอบ
+> และต่อ daily-budget แล้ว. สมองเป็น **Action Plan** (1 ประโยคทำได้หลายคำสั่ง) +
+> มี type `todo`; บน Chrome/Edge ใช้ Web Speech API และติดตั้งเป็น PWA ได้
 
 ---
 
@@ -40,6 +40,7 @@
 │  STT engine (สลับได้)     │
 │   • cloud  → Groq Whisper │  แม่นไทยสูง ต้องต่อเน็ต + API key (ทำงานใน Expo Go ได้)
 │   • device → OS on-device │  ฟรี เร็ว ออฟไลน์ได้ (ต้อง dev build)
+│   • web    → Web Speech   │  Chrome/Edge · ไม่อัปโหลดไฟล์เสียง
 └──────────┬───────────────┘
            │ text (ไทย)
            ▼
@@ -63,6 +64,7 @@
 | `src/speech/useVoiceInput.ts` | หัวใจ push-to-talk — คุมการอัด/ฟังแล้วส่ง transcript ออกทาง `onResult` |
 | `src/speech/cloudGroq.ts` | STT ฝั่ง cloud — อัพโหลดเสียงไป Groq Whisper |
 | `src/speech/deviceStt.ts` | STT ในเครื่อง (expo-speech-recognition) + เช็คว่ารันได้ไหม |
+| `src/speech/webStt.ts` | STT บน browser ผ่าน Web Speech API + live partial |
 | `src/speech/tts.ts` | พูดตอบกลับด้วยเสียง OS (expo-speech) |
 | `src/speech/engines.ts` | รายการ engine + คำนวณว่าตัวไหนใช้ได้ตอนนี้ |
 | `src/brain/prompt.ts` | สร้าง prompt ให้ LLM (แนบวันที่/timezone ปัจจุบันเสมอ) |
@@ -78,6 +80,7 @@
 | `scripts/test-brain.mjs` | เทสต์สมองจาก terminal: `node scripts/test-brain.mjs "…"` |
 | `src/config.ts` | ค่าตั้ง + อ่าน API key จาก env (รวมชื่อ Groq model) |
 | `src/theme.ts` | สี/spacing รวมศูนย์ (ธีมมืด) |
+| `scripts/inject-pwa.mjs` | ผูก manifest/service worker และ precache app shell หลัง web export |
 
 **การเพิ่ม/สลับ engine ทำที่จุดเดียว:** implement STT ตัวใหม่ แล้วผูกเข้ากับ
 `useVoiceInput` + เพิ่ม entry ใน `engines.ts` — `App.tsx` ไม่ต้องแก้ตรรกะ
@@ -106,6 +109,17 @@ npx expo run:ios      # หรือ  npx expo run:android
 แล้วในแอปจะเลือก engine **On-device** ได้ (ถ้ายังรันใน Expo Go ปุ่มนี้จะถูก disable
 พร้อมบอกเหตุผล)
 
+### รันบนเว็บ / สร้าง PWA
+
+```bash
+npm run web          # dev server
+npm run web:build    # export ไป dist/ + ผูก manifest/service worker
+```
+
+เปิดด้วย Chrome หรือ Edge เพื่อใช้ Browser STT ภาษาไทย. PWA เปิด app shell
+ออฟไลน์ได้ และ items ยังเก็บแบบ local-first; การตั้งเตือนบน web ยังไม่รองรับ
+ในรอบนี้ (ต้องทำ Web Push แยก)
+
 ---
 
 ## Roadmap
@@ -117,6 +131,8 @@ npx expo run:ios      # หรือ  npx expo run:android
 | **2. บันทึก + เตือน** | เก็บ local (zustand+AsyncStorage) + `expo-notifications` ยิงเตือน (รวม recurring) | ✅ ทำแล้ว |
 | **3. Query** | ถาม "วันนี้มีอะไรทำบ้าง" แล้วค้น+สรุปตอบด้วยเสียง | ✅ ทำแล้ว (พื้นฐาน) |
 | **4. Integrate budget** | intent `add_expense` → deep link เปิดหน้าเพิ่มรายการของ daily-budget แบบกรอกให้พร้อม | ✅ ทำแล้ว |
+| **5. Web / PWA** | Browser STT, web guards, installable/offline app shell | ✅ ทำแล้ว |
+| **6. Supabase sync** | backup/sync items ข้ามเครื่องแบบ local-first | ⏳ ถัดไป |
 
 รายละเอียดเชิงลึก (สัญญาของ speech layer, schema ของ intent/ข้อมูล, แผน integrate) อยู่ที่
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
@@ -131,6 +147,6 @@ Supabase Edge Function (แพตเทิร์นเดียวกับท�
 
 ## Stack
 
-Expo SDK 54 (React Native 0.86) · TypeScript · expo-audio · expo-speech ·
+Expo SDK 57 (React Native 0.86) · TypeScript · React Native Web · expo-audio · expo-speech ·
 expo-speech-recognition · Groq Whisper — ล้อแนวเดียวกับโปรเจกต์พี่น้อง `daily-budget`
 เพื่อให้ integrate กันง่ายในอนาคต

@@ -44,7 +44,7 @@ const WAVEFORM_HEIGHTS = [4, 9, 14, 7, 12, 5, 10] as const;
 
 export default function App() {
   const engines = useMemo(() => getEngines(), []);
-  const firstAvailable = engines.find((candidate) => candidate.available)?.id ?? 'cloud';
+  const firstAvailable = engines.find((candidate) => candidate.available)?.id ?? engines[0]?.id ?? 'cloud';
   const [engine, setEngine] = useState<SttEngineId>(firstAvailable);
   const [last, setLast] = useState<TranscriptResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -331,7 +331,7 @@ export default function App() {
             {last && (
               <UserMessage
                 text={last.text || '(ไม่พบข้อความ)'}
-                meta={`${last.engine === 'cloud' ? 'CLOUD STT' : 'ON-DEVICE STT'} · ${last.elapsedMs} MS`}
+                meta={`${last.engine === 'cloud' ? 'CLOUD STT' : last.engine === 'device' ? 'ON-DEVICE STT' : 'BROWSER STT'} · ${last.elapsedMs} MS`}
                 onReplay={last.text ? () => speak(last.text) : undefined}
               />
             )}
