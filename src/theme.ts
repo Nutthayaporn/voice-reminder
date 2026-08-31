@@ -1,27 +1,29 @@
-// Single dark-first theme for the voice-first app. Kept tiny on purpose —
-// Phase 0 has one screen. Mirrors daily-budget's centralised-theme approach so
-// a future design pass (or dark/light toggle) only touches this file.
-
 export const colors = {
-  bg: '#0B1120', // slate-950-ish
-  bgAlt: '#111A2E',
-  card: '#172036',
-  border: '#243049',
+  bg: '#02070C',
+  bgAlt: '#06121A',
+  card: '#081923',
+  cardRaised: '#0A202C',
+  border: '#123747',
+  borderBright: '#1D697C',
 
-  primary: '#38BDF8', // sky-400 — the "listening" accent
-  primaryDark: '#0EA5E9',
-  primarySoft: '#0C2A3E',
+  primary: '#44F1FF',
+  primaryBright: '#C5FCFF',
+  primaryDark: '#0CB2C6',
+  primarySoft: 'rgba(68, 241, 255, 0.09)',
+  primaryGlow: 'rgba(68, 241, 255, 0.28)',
+  blue: '#278BFF',
 
-  danger: '#F87171',
-  success: '#34D399',
-  warning: '#FBBF24',
+  danger: '#FF5E78',
+  dangerSoft: 'rgba(255, 94, 120, 0.10)',
+  success: '#57F2B1',
+  warning: '#FFD166',
 
-  text: '#F1F5F9',
-  textMute: '#94A3B8',
-  textFaint: '#64748B',
-  onPrimary: '#04121D',
+  text: '#EAFDFF',
+  textMute: '#8BA9B5',
+  textFaint: '#4D7280',
+  onPrimary: '#001014',
 } as const;
 
 export const spacing = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 40 } as const;
-export const radius = { sm: 8, md: 12, lg: 16, xl: 24, pill: 999 } as const;
-export const font = { xs: 12, sm: 14, md: 16, lg: 20, xl: 26, xxl: 34, display: 44 } as const;
+export const radius = { sm: 6, md: 10, lg: 16, xl: 24, pill: 999 } as const;
+export const font = { xs: 11, sm: 13, md: 16, lg: 19, xl: 25, xxl: 32, display: 42 } as const;
