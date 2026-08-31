@@ -7,6 +7,7 @@ node_modules/
 .expo/
 dist/
 web-build/
+artifacts/
 expo-env.d.ts
 
 # Native
@@ -40,6 +41,7 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+/modules/voice-alarm/android/build/
 
 # Supabase CLI local state
 /supabase/.temp/

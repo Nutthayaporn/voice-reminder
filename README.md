@@ -18,7 +18,9 @@
 | พูดว่า | intent | ระบบทำอะไร |
 | --- | --- | --- |
 | "พรุ่งนี้อย่าลืมกินยาตอน 9 โมง" | `create_reminder` (ครั้งเดียว) | ตั้งเตือนพรุ่งนี้ 09:00 |
-| "ตั้งปลุกทุกวัน 8 โมง ยกเว้นเสาร์อาทิตย์" | `create_reminder` (ซ้ำ + เงื่อนไข) | recurring จ–ศ 08:00 |
+| "ตั้งปลุกทุกวัน 8 โมง ยกเว้นเสาร์อาทิตย์" | `create_reminder` + `alert_mode=alarm` | นาฬิกาปลุก recurring จ–ศ 08:00 |
+| "พรุ่งนี้ 9 โมงแจ้งเตือนให้โทรหาแม่" | `create_reminder` + `alert_mode=notification` | notification ปกติ |
+| "ปลุกกินยา 7 โมง เตือนจนกว่าจะทำ" | `create_reminder` + `remind_until_done=true` | ต้องกดทำแล้ว หรือ Snooze 5/10/30 นาที |
 | "1–2 Sep พ่อแม่ไปขายของ" | `create_event` | บันทึกช่วงวันที่ |
 | "วันนี้เป็นวันแรกที่ลูกพูดได้" | `create_note` (diary) | บันทึกความทรงจำผูกวันที่ |
 | "วันนี้มีอะไรต้องทำบ้าง" | `query` | ค้น แล้วสรุปตอบด้วยเสียง |
@@ -49,7 +51,7 @@
 └──────────┬───────────────┘
            │ actions[]
            ▼
-   local store (zustand) + expo-notifications  →  execute ทุก action
+   local store (zustand) + notification/native alarm  →  execute ทุก action
            │
            ▼
    🔊 TTS (src/speech/tts.ts) พูดตอบกลับ
@@ -76,8 +78,10 @@
 | `src/store/cloud.ts` | map/push/pull/realtime items กับ Supabase (ไม่ sync notification IDs) |
 | `src/lib/supabase.ts` | optional Supabase client; env ว่างแล้วคืน local-only mode |
 | `src/store/query.ts` | ตอบคำถาม "วันนี้มีอะไร" จาก items ในเครื่อง |
-| `src/notify/scheduler.ts` | แปลง item.recurrence → local notification triggers |
+| `src/notify/scheduler.ts` | route ตาม alert_mode แล้วแปลง recurrence → trigger |
 | `src/notify/setup.ts` | ตั้ง handler/permission/channel ของ notification |
+| `src/notify/nativeAlarm.ts` | bridge กลางสำหรับนาฬิกาปลุกจริง + fallback |
+| `modules/voice-alarm/` | Expo local module: AlarmKit (iOS 26+) / AlarmManager (Android) |
 | `src/integrations/dailyBudget.ts` | ยิง deep link `dailybudget://entry?...` ส่งรายจ่ายไปแอปงบ |
 | `scripts/test-brain.mjs` | เทสต์สมองจาก terminal: `node scripts/test-brain.mjs "…"` |
 | `src/config.ts` | ค่าตั้ง + อ่าน API key จาก env (รวมชื่อ Groq model) |
@@ -111,6 +115,15 @@ npx expo run:ios      # หรือ  npx expo run:android
 แล้วในแอปจะเลือก engine **On-device** ได้ (ถ้ายังรันใน Expo Go ปุ่มนี้จะถูก disable
 พร้อมบอกเหตุผล)
 
+โหมด reminder แบบ `alarm` ต้องใช้ dev build เช่นกัน: Android ใช้ exact alarm พร้อมหน้าจอ
+ทำแล้ว/Stop/Snooze และ iOS 26+ ใช้ AlarmKit พร้อม Repeat. ในรายการ reminder กดปุ่มรูปแบบ
+วนได้ `NOTIFY → ALARM → UNTIL DONE` และกดค่า Snooze เพื่อวน 5/10/30 นาที (ค่าเริ่มต้น
+10 นาที รวมสูงสุด 5 รอบ). iOS รุ่นเก่าหรือเครื่องที่ native alarm ไม่พร้อมจะ fallback เป็น
+Time Sensitive notification หลายรอบสำหรับรายการแบบ Until Done โดยไม่ทำให้รายการหาย.
+Android 12/12L อาจขอสิทธิ์
+“Alarms & reminders”; Android 13+ ใช้ `USE_EXACT_ALARM` เพราะการเตือนตามเวลาคือ core function
+ของแอป (ตอนขึ้น Play Store ต้องระบุ use case ให้ตรงนโยบาย)
+
 ### รันบนเว็บ / สร้าง PWA
 
 ```bash
@@ -141,7 +154,7 @@ npm run web:build    # export ไป dist/ + ผูก manifest/service worker
 | --- | --- | --- |
 | **0. Speech playground** | ปุ่มเดียว พูด→ถอดเสียง→พูดกลับ + สลับ cloud/device เทียบกัน | ✅ ทำแล้ว |
 | **1. The Brain** | ต่อ Groq LLM (JSON mode) แปลง text → intent JSON + พูดตอบกลับ (`src/brain/`) | ✅ ทำแล้ว |
-| **2. บันทึก + เตือน** | เก็บ local (zustand+AsyncStorage) + `expo-notifications` ยิงเตือน (รวม recurring) | ✅ ทำแล้ว |
+| **2. บันทึก + เตือน** | เก็บ local + เลือก notification หรือนาฬิกาปลุกจริงต่อ reminder (รวม recurring) | ✅ ทำแล้ว |
 | **3. Query** | ถาม "วันนี้มีอะไรทำบ้าง" แล้วค้น+สรุปตอบด้วยเสียง | ✅ ทำแล้ว (พื้นฐาน) |
 | **4. Integrate budget** | intent `add_expense` → deep link เปิดหน้าเพิ่มรายการของ daily-budget แบบกรอกให้พร้อม | ✅ ทำแล้ว |
 | **5. Web / PWA** | Browser STT, web guards, installable/offline app shell | ✅ ทำแล้ว |

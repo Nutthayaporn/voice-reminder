@@ -30,6 +30,19 @@ export async function initNotifications(): Promise<void> {
         importance: Notifications.AndroidImportance.HIGH,
         sound: 'default',
       });
+      await Notifications.setNotificationChannelAsync('alarm-fallback', {
+        name: 'นาฬิกาปลุก (โหมดสำรอง)',
+        description: 'ใช้เมื่ออุปกรณ์ไม่รองรับระบบนาฬิกาปลุกแบบ native',
+        importance: Notifications.AndroidImportance.MAX,
+        sound: 'default',
+        enableVibrate: true,
+        vibrationPattern: [0, 500, 350, 500],
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+        audioAttributes: {
+          usage: Notifications.AndroidAudioUsage.ALARM,
+          contentType: Notifications.AndroidAudioContentType.SONIFICATION,
+        },
+      });
     }
   } catch {
     /* native module unavailable (Expo Go) — ignore */

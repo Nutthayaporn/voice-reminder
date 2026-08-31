@@ -52,6 +52,10 @@ timezone อ้างอิงคือ Asia/Bangkok เสมอ ทุก date
       "end_datetime": string | null, // ISO+07:00 เวลาสิ้นสุด (ช่วงวัน)
       "all_day": boolean,
       "recurrence": null | { "freq":"daily"|"weekly"|"monthly"|"yearly", "byday": ["MO".."SU"] | null, "interval": number },
+      "alert_mode": "notification" | "alarm" | null, // reminder: วิธีเตือน; ไม่ระบุให้ใช้ notification
+      "remind_until_done": boolean | null, // true = ไม่มีปุ่มหยุดเฉย ๆ ต้องทำแล้วหรือ snooze
+      "snooze_minutes": 5 | 10 | 30 | null,
+      "max_attempts": number | null,        // จำนวนรอบเตือนรวม; default 5
       "amount": number | null,       // เฉพาะ record_expense (บาท)
       "query_kind": "list_today" | "list_range" | "search" | null,
       "people": ["ชื่อ/ความสัมพันธ์"] | null,  // เฉพาะ create_note: คนที่เกี่ยวข้อง เช่น ["ลูก"]
@@ -76,12 +80,24 @@ timezone อ้างอิงคือ Asia/Bangkok เสมอ ทุก date
     - "list_today" = ถามตารางวันนี้ (เช่น "วันนี้มีอะไรบ้าง")
     - "list_range" = ถามช่วงเวลา (เช่น "พรุ่งนี้มีอะไร", "อาทิตย์นี้มีนัดไหม") — ต้องใส่ datetime=ต้นช่วง และ end_datetime=ท้ายช่วง เป็น ISO+07:00 (เช่น พรุ่งนี้ = 00:00 ถึง 23:59 ของพรุ่งนี้)
     - "search" = ค้นความทรงจำ/ไดอารี่ย้อนหลัง (เช่น "ลูกเริ่มพูดได้เมื่อไหร่", "ไปเที่ยวทะเลครั้งล่าสุดเมื่อไร") — ใส่คำถามไว้ใน title
+- alert_mode ของ create_reminder:
+    - "alarm" เมื่อผู้ใช้พูดว่า "ปลุก", "นาฬิกาปลุก", "ดังจนกว่าจะปิด" หรือขอเตือนแบบปลุก
+    - "notification" เมื่อพูดว่า "แจ้งเตือน", "notification", "เด้งเตือน" หรือไม่ได้ระบุชนิด
+    - update_item ใช้ alert_mode เมื่อต้องการเปลี่ยนวิธีเตือนของรายการเดิม
+- remind_until_done ของ create_reminder/update_item:
+    - true เมื่อผู้ใช้พูดว่า "เตือนจนกว่าจะทำ", "ปลุกจนกว่าจะทำ", "อย่าหยุดเตือน", "ขี้ลืม" หรือขอให้ยืนยันว่าทำแล้ว; และต้องตั้ง alert_mode="alarm" ด้วย
+    - false เมื่อขอ "เตือนครั้งเดียว", เปลี่ยนเป็น notification หรือนาฬิกาปลุกธรรมดา
+    - ถ้าไม่ระบุให้เป็น false สำหรับ create_reminder และ null สำหรับ update_item
+- snooze_minutes: อ่านจาก "เลื่อนปลุกครั้งละ X นาที/Snooze X นาที"; ถ้าไม่ระบุให้ใช้ 10 สำหรับ create_reminder
+    - คำว่า "เลื่อนปลุก 5/10/30 นาที" หมายถึงเปลี่ยน snooze_minutes เท่านั้น ห้ามขยับ datetime
+    - ขยับ datetime เฉพาะเมื่อพูดว่าเลื่อน "เวลา/รายการ/อันนี้" ไปเวลาหรือวันใหม่
+- max_attempts: จำนวนรอบเตือนรวมเมื่อผู้ใช้ระบุ; ถ้าไม่ระบุให้ใช้ 5 สำหรับ create_reminder (ต้องอยู่ระหว่าง 1–20)
 
 ตัวอย่างหลาย action:
 ผู้ใช้: "1 ถึง 2 กันยา พ่อแม่ไปขายของ เตือนผมก่อน 1 วัน"
 => {"actions":[
      {"tool":"create_event","title":"พ่อแม่ไปขายของ","body":null,"datetime":"2026-09-01T00:00:00+07:00","end_datetime":"2026-09-02T23:59:59+07:00","all_day":true,"recurrence":null,"amount":null,"query_kind":null},
-     {"tool":"create_reminder","title":"พรุ่งนี้พ่อแม่ไปขายของ","body":null,"datetime":"2026-08-31T09:00:00+07:00","end_datetime":null,"all_day":false,"recurrence":null,"amount":null,"query_kind":null}
+     {"tool":"create_reminder","title":"พรุ่งนี้พ่อแม่ไปขายของ","body":null,"datetime":"2026-08-31T09:00:00+07:00","end_datetime":null,"all_day":false,"recurrence":null,"alert_mode":"notification","remind_until_done":false,"snooze_minutes":10,"max_attempts":5,"amount":null,"query_kind":null}
    ],"speak_back":"บันทึกให้แล้วครับ เดี๋ยวเตือนก่อนหนึ่งวัน"}
 
 กติกาอื่น:

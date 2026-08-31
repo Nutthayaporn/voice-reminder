@@ -67,6 +67,25 @@ export function describeAction(a: BrainAction): Array<{ label: string; value: st
   if (when) rows.push({ label: 'เมื่อ', value: end ? `${when} – ${end}` : when });
   const rec = formatRecurrence(a.recurrence);
   if (rec) rows.push({ label: 'ซ้ำ', value: rec });
+  if (
+    a.tool === 'create_reminder' ||
+    (a.tool === 'update_item' && (a.alert_mode || a.remind_until_done != null))
+  ) {
+    rows.push({
+      label: 'รูปแบบ',
+      value: a.remind_until_done
+        ? '🔁 ปลุกจนกว่าจะทำ'
+        : a.alert_mode === 'alarm'
+          ? '⏰ นาฬิกาปลุก'
+          : '🔔 แจ้งเตือน',
+    });
+  }
+  if (a.snooze_minutes && (a.alert_mode === 'alarm' || a.remind_until_done)) {
+    rows.push({ label: 'เลื่อนปลุก', value: `${a.snooze_minutes} นาที` });
+  }
+  if (a.remind_until_done && a.max_attempts) {
+    rows.push({ label: 'เตือนสูงสุด', value: `${a.max_attempts} รอบ` });
+  }
   if (a.amount != null) rows.push({ label: 'จำนวน', value: `${a.amount} บาท` });
   if (a.body) rows.push({ label: 'รายละเอียด', value: a.body });
   return rows;

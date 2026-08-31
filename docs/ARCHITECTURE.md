@@ -115,7 +115,8 @@ store (ทับ speak_back เพราะเป็น data-driven), `record_ex
 
 > **สถานะ: ทำแล้ว (local-first + optional cloud sync)** — เก็บด้วย zustand + AsyncStorage ใน
 > `src/store/useStore.ts` (record = `Item` ใน `src/store/types.ts`), แปลงจาก intent
-> ด้วย `src/brain/toItem.ts`, ตั้งเตือนด้วย `expo-notifications` ใน `src/notify/`.
+> ด้วย `src/brain/toItem.ts`, ตั้งเตือนผ่าน router ใน `src/notify/` ซึ่งเลือก notification
+> หรือ native alarm ตาม `alert_mode`.
 > Cloud sync ใช้ optional Supabase client + email OTP, persisted offline write queue,
 > soft delete, Realtime/foreground pull และ last-write-wins ด้วย `updated_at`. ดู
 > `src/store/cloud.ts`, `src/store/useStore.ts` และ `supabase/migrations/`. ถ้าไม่ตั้ง env หรือ
@@ -135,6 +136,10 @@ create table items (
   title       text not null,
   start_at    timestamptz,
   recurrence  jsonb,
+  alert_mode  text not null default 'notification', -- notification/alarm
+  remind_until_done boolean not null default false,
+  snooze_minutes integer not null default 10,         -- 5/10/30
+  max_attempts integer not null default 5,            -- รวมรอบแรก
   updated_at  timestamptz not null,    -- LWW conflict key
   deleted_at  timestamptz,             -- soft-delete tombstone
   primary key (user_id, id)
@@ -143,8 +148,21 @@ create table items (
 
 - ต่อ Supabase ด้วยแพตเทิร์นเดียวกับ daily-budget (`src/lib/supabase.ts` ที่ client เป็น
   `null` เมื่อยังไม่ตั้งค่า → แอปยัง demo ได้แบบ local)
-- การเตือนจริงใช้ `expo-notifications` — recurring/ยกเว้นวันหยุด map จาก `recurrence`
-  ไปเป็น scheduled local notifications (ต้อง dev build เช่นกัน)
+- แต่ละ reminder มี `alert_mode`: `notification` (ค่าเดิม/default) หรือ `alarm`
+- `remind_until_done=true` คือระดับที่สามใน UI (`UNTIL DONE`) และบังคับ `alert_mode=alarm`;
+  ค่าปกติคือ Snooze 10 นาที รวมสูงสุด 5 รอบ
+- `notification` ใช้ `expo-notifications`; `alarm` ใช้ Expo local module ที่
+  `modules/voice-alarm/` — Android ใช้ `AlarmManager.setAlarmClock()` + foreground ringing
+  service + full-screen ทำแล้ว/Stop/Snooze, ส่วน iOS 26+ ใช้ AlarmKit Repeat
+- Android เก็บ Snooze chain ข้าม reboot และส่ง item id ที่กด "ทำแล้ว" กลับ JS ตอนแอป active;
+  แอปจึง mark done + cancel รอบที่เหลือได้แม้ตอนกดปุ่ม JS ถูก suspend
+- AlarmKit ใช้ `postAlert` เป็นระยะ Snooze และ stop intent เพื่อส่งสถานะทำแล้วกลับแอป;
+  จำนวน Repeat สูงสุดบน iOS เป็นพฤติกรรมที่ระบบจัดการ จึงยังบังคับ cap แบบ Android ไม่ได้
+- AlarmKit รองรับ one-shot/daily/weekly ใน implementation นี้; monthly/yearly และ iOS < 26
+  fallback เป็น Time Sensitive notification. รายการ one-shot แบบ Until Done จะเตรียม
+  notification หลายรอบตาม `snooze_minutes`/`max_attempts` ถ้า native alarm ใช้ไม่ได้
+- schedule IDs ไม่ sync: prefix `alarm:` คือ native alarm, `notification:` คือ Expo notification
+  ทำให้ update/delete cancel backend ที่ถูกต้องได้
 
 ## 5. Phase 4 — Integrate กับ daily-budget
 
@@ -183,6 +201,6 @@ iOS ต้องมี `dailybudget` ใน `LSApplicationQueriesSchemes` (ต�
 - Whisper รับ `language=th` ช่วยความแม่น อย่าลืมส่ง
 - notification trigger แบบ recurring (WEEKLY/DAILY) ใช้ **เวลาท้องถิ่นของเครื่อง** —
   โค้ดสมมติเครื่องอยู่ Asia/Bangkok. ถ้าจะรองรับข้าม timezone ต้องแปลงเพิ่ม
-- expo-notifications: **ต้อง dev build** ถึงจะยิงเตือนจริง; ใน Expo Go save ได้แต่ไม่เตือน
+- native alarm: **ต้อง dev build**; ใน Expo Go จะ fallback ไป notification ตาม capability
 - บน web ใช้ platform files (`*.web.ts`) ตัด `expo-notifications` และ native file uploader
   ออกจาก bundle; items บันทึกได้แต่ยังไม่มี Web Push

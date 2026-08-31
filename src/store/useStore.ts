@@ -80,8 +80,17 @@ function makeOpId(): string {
 }
 
 function normaliseItem(item: Item): Item {
+  const snooze = item.snooze_minutes;
+  const remindUntilDone = item.remind_until_done ?? false;
   return {
     ...item,
+    alert_mode: remindUntilDone ? 'alarm' : (item.alert_mode ?? 'notification'),
+    remind_until_done: remindUntilDone,
+    snooze_minutes: snooze === 5 || snooze === 10 || snooze === 30 ? snooze : 10,
+    max_attempts:
+      typeof item.max_attempts === 'number'
+        ? Math.max(1, Math.min(20, Math.round(item.max_attempts)))
+        : 5,
     updated_at: item.updated_at || item.created_at || new Date().toISOString(),
     notificationIds: item.notificationIds ?? [],
   };
@@ -110,6 +119,10 @@ function scheduleFingerprint(item: Item): string {
     start_at: item.start_at,
     all_day: item.all_day,
     recurrence: item.recurrence,
+    alert_mode: item.alert_mode,
+    remind_until_done: item.remind_until_done,
+    snooze_minutes: item.snooze_minutes,
+    max_attempts: item.max_attempts,
   });
 }
 
@@ -471,7 +484,7 @@ export const useStore = create<StoreState>()(
     },
     {
       name: 'voice-reminder/items',
-      version: 1,
+      version: 3,
       storage: createJSONStorage(() => AsyncStorage),
       partialize: (state) => ({
         items: state.items,
@@ -482,7 +495,9 @@ export const useStore = create<StoreState>()(
       migrate: (persisted: any) => {
         if (!persisted) return persisted;
         persisted.items = (persisted.items ?? []).map((item: Item) => normaliseItem(item));
-        persisted.pendingOps = persisted.pendingOps ?? [];
+        persisted.pendingOps = (persisted.pendingOps ?? []).map((op: PendingSyncOp) =>
+          op.kind === 'upsert' ? { ...op, item: normaliseItem(op.item) } : op,
+        );
         persisted.cacheOwnerId = persisted.cacheOwnerId ?? null;
         return persisted;
       },

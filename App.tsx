@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
+  AppState,
   Easing,
   Pressable,
   ScrollView,
@@ -22,12 +23,13 @@ import { planActions } from './src/brain/planActions';
 import { actionToItem } from './src/brain/toItem';
 import { searchMemory } from './src/brain/searchMemory';
 import { describeAction, toolLabel, formatDateTime, formatRecurrence } from './src/brain/format';
-import type { BrainPlan, BrainContext, Referent } from './src/brain/types';
+import type { BrainPlan, BrainContext, Referent, SnoozeMinutes } from './src/brain/types';
 import { useStore } from './src/store/useStore';
 import { answerQuery, queryItems } from './src/store/query';
 import type { Item } from './src/store/types';
 import { initNotifications, ensureNotifyPermission } from './src/notify/setup';
 import { scheduleForItem, cancelNotifications } from './src/notify/scheduler';
+import { consumeCompletedNativeAlarmItemIds } from './src/notify/nativeAlarm';
 import { sendExpenseToDailyBudget } from './src/integrations/dailyBudget';
 import { bkkDateStr } from './src/lib/date';
 import { CloudSyncPanel } from './src/components/CloudSyncPanel';
@@ -56,7 +58,6 @@ export default function App() {
   const hasHydrated = useStore((state) => state.hasHydrated);
   const addItem = useStore((state) => state.addItem);
   const removeItem = useStore((state) => state.removeItem);
-  const toggleDone = useStore((state) => state.toggleDone);
   const updateItem = useStore((state) => state.updateItem);
   const bootstrapSync = useStore((state) => state.bootstrapSync);
 
@@ -64,9 +65,25 @@ export default function App() {
   // ("อันแรก" / "อันเมื่อกี้") + a pending utterance awaiting clarification.
   const contextRef = useRef<BrainContext>({ referents: [] });
 
+  const syncNativeCompletions = useCallback(async () => {
+    const completedIds = await consumeCompletedNativeAlarmItemIds();
+    if (!completedIds.length) return;
+    const completed = new Set(completedIds);
+    for (const item of useStore.getState().items) {
+      if (!completed.has(item.id) || item.done) continue;
+      await cancelNotifications(item.notificationIds);
+      updateItem(item.id, { done: true, notificationIds: [] });
+    }
+  }, [updateItem]);
+
   useEffect(() => {
     void initNotifications();
-  }, []);
+    void syncNativeCompletions();
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void syncNativeCompletions();
+    });
+    return () => subscription.remove();
+  }, [syncNativeCompletions]);
 
   useEffect(() => {
     if (hasHydrated) void bootstrapSync();
@@ -79,9 +96,28 @@ export default function App() {
       if (action.datetime) patch.start_at = action.datetime;
       if (action.end_datetime) patch.end_at = action.end_datetime;
       if (action.recurrence) patch.recurrence = action.recurrence;
+      if (action.alert_mode) {
+        patch.alert_mode = action.alert_mode;
+        // Choosing a delivery mode explicitly means ordinary one-shot alarm
+        // unless the same action explicitly opts into Until Done below.
+        if (action.remind_until_done == null) patch.remind_until_done = false;
+      }
+      if (action.remind_until_done != null) {
+        patch.remind_until_done = action.remind_until_done;
+        if (action.remind_until_done) patch.alert_mode = 'alarm';
+      }
+      if (action.snooze_minutes) patch.snooze_minutes = action.snooze_minutes;
+      if (action.max_attempts) patch.max_attempts = action.max_attempts;
       if (action.done != null) patch.done = action.done;
 
-      const timingChanged = patch.start_at !== undefined || patch.recurrence !== undefined;
+      const timingChanged =
+        patch.start_at !== undefined ||
+        patch.recurrence !== undefined ||
+        patch.alert_mode !== undefined ||
+        patch.remind_until_done !== undefined ||
+        patch.snooze_minutes !== undefined ||
+        patch.max_attempts !== undefined ||
+        patch.done !== undefined;
       if (timingChanged) {
         await cancelNotifications(target.notificationIds);
         patch.notificationIds = await scheduleForItem({ ...target, ...patch });
@@ -203,6 +239,51 @@ export default function App() {
       removeItem(item.id);
     },
     [removeItem],
+  );
+
+  const handleAlertModeChange = useCallback(
+    async (item: Item) => {
+      const patch: Pick<Item, 'alert_mode' | 'remind_until_done'> =
+        item.alert_mode === 'notification'
+          ? { alert_mode: 'alarm', remind_until_done: false }
+          : item.remind_until_done
+            ? { alert_mode: 'notification', remind_until_done: false }
+            : { alert_mode: 'alarm', remind_until_done: true };
+      await ensureNotifyPermission();
+      await cancelNotifications(item.notificationIds);
+      const next = { ...item, ...patch };
+      const notificationIds = await scheduleForItem(next);
+      updateItem(item.id, { ...patch, notificationIds });
+    },
+    [updateItem],
+  );
+
+  const handleSnoozeMinutesChange = useCallback(
+    async (item: Item) => {
+      const choices: SnoozeMinutes[] = [5, 10, 30];
+      const current = choices.indexOf(item.snooze_minutes);
+      const snooze_minutes = choices[(current + 1) % choices.length];
+      await cancelNotifications(item.notificationIds);
+      const next = { ...item, snooze_minutes };
+      const notificationIds = await scheduleForItem(next);
+      updateItem(item.id, { snooze_minutes, notificationIds });
+    },
+    [updateItem],
+  );
+
+  const handleToggleDone = useCallback(
+    async (item: Item) => {
+      if (!item.done) {
+        await cancelNotifications(item.notificationIds);
+        updateItem(item.id, { done: true, notificationIds: [] });
+        return;
+      }
+      await ensureNotifyPermission();
+      const next = { ...item, done: false };
+      const notificationIds = await scheduleForItem(next);
+      updateItem(item.id, { done: false, notificationIds });
+    },
+    [updateItem],
   );
 
   const handleError = useCallback((message: string) => setError(message), []);
@@ -440,7 +521,9 @@ export default function App() {
                     key={item.id}
                     index={index + 1}
                     item={item}
-                    onToggle={() => toggleDone(item.id)}
+                    onToggle={() => void handleToggleDone(item)}
+                    onAlertModeChange={() => void handleAlertModeChange(item)}
+                    onSnoozeMinutesChange={() => void handleSnoozeMinutesChange(item)}
                     onDelete={() => handleDelete(item)}
                   />
                 ))}
@@ -717,7 +800,17 @@ function toReferents(items: Item[]): Referent[] {
   return items.slice(0, 8).map((item) => {
     const when = formatDateTime(item.start_at, item.all_day);
     const iso = item.start_at ? ` {${item.start_at}}` : '';
-    return { ref: item.id, label: `${item.title}${when ? ` — ${when}` : ''}${iso}` };
+    const mode =
+      item.type === 'reminder'
+        ? ` [${
+            item.remind_until_done
+              ? 'ปลุกจนกว่าจะทำ'
+              : item.alert_mode === 'alarm'
+                ? 'นาฬิกาปลุก'
+                : 'แจ้งเตือน'
+          }]`
+        : '';
+    return { ref: item.id, label: `${item.title}${when ? ` — ${when}` : ''}${mode}${iso}` };
   });
 }
 
@@ -725,11 +818,15 @@ function ItemRow({
   item,
   index,
   onToggle,
+  onAlertModeChange,
+  onSnoozeMinutesChange,
   onDelete,
 }: {
   item: Item;
   index: number;
   onToggle: () => void;
+  onAlertModeChange: () => void;
+  onSnoozeMinutesChange: () => void;
   onDelete: () => void;
 }) {
   const when = formatDateTime(item.start_at, item.all_day);
@@ -763,6 +860,47 @@ function ItemRow({
         </Text>
         {!!detail && <Text style={styles.itemSub}>{detail}</Text>}
       </View>
+      {item.type === 'reminder' && (
+        <View style={styles.alertControls}>
+          <Pressable
+            accessibilityLabel={`เปลี่ยนรูปแบบการเตือนของ ${item.title}`}
+            accessibilityHint="วนระหว่างแจ้งเตือน นาฬิกาปลุก และปลุกจนกว่าจะทำ"
+            accessibilityRole="button"
+            hitSlop={8}
+            onPress={onAlertModeChange}
+            style={[
+              styles.alertModeButton,
+              item.alert_mode === 'alarm' && styles.alertModeButtonAlarm,
+            ]}
+          >
+            <Text
+              style={[
+                styles.alertModeText,
+                item.alert_mode === 'alarm' && styles.alertModeTextAlarm,
+              ]}
+            >
+              {item.remind_until_done
+                ? '🔁 UNTIL DONE'
+                : item.alert_mode === 'alarm'
+                  ? '⏰ ALARM'
+                  : '🔔 NOTIFY'}
+            </Text>
+          </Pressable>
+          {item.alert_mode === 'alarm' && (
+            <Pressable
+              accessibilityLabel={`เปลี่ยนเวลาเลื่อนปลุกของ ${item.title}`}
+              accessibilityRole="button"
+              hitSlop={6}
+              onPress={onSnoozeMinutesChange}
+              style={styles.snoozeButton}
+            >
+              <Text style={styles.snoozeText}>
+                SNOOZE {item.snooze_minutes}M · ×{item.max_attempts}
+              </Text>
+            </Pressable>
+          )}
+        </View>
+      )}
       <Pressable
         accessibilityLabel={`ลบ ${item.title}`}
         accessibilityRole="button"
@@ -1061,6 +1199,23 @@ const styles = StyleSheet.create({
   itemTitle: { color: colors.text, fontSize: font.sm, fontWeight: '700' },
   itemTitleDone: { color: colors.textMute, textDecorationLine: 'line-through' },
   itemSub: { color: colors.textFaint, fontSize: font.xs },
+  alertModeButton: {
+    minWidth: 76, height: 28, paddingHorizontal: 7, borderWidth: 1,
+    borderColor: colors.border, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(68, 241, 255, 0.03)',
+  },
+  alertModeButtonAlarm: {
+    borderColor: colors.warning, backgroundColor: 'rgba(255, 209, 102, 0.08)',
+  },
+  alertModeText: { color: colors.textFaint, fontSize: 7, fontWeight: '800', letterSpacing: 0.7 },
+  alertModeTextAlarm: { color: colors.warning },
+  alertControls: { alignItems: 'stretch', gap: 4 },
+  snoozeButton: {
+    minWidth: 76, height: 20, paddingHorizontal: 5, borderWidth: 1,
+    borderColor: colors.border, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255, 209, 102, 0.035)',
+  },
+  snoozeText: { color: colors.textFaint, fontSize: 6, fontWeight: '700', letterSpacing: 0.35 },
   deleteButton: {
     width: 28, height: 28, borderWidth: 1, borderColor: colors.border,
     alignItems: 'center', justifyContent: 'center',

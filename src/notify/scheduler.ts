@@ -9,6 +9,7 @@ import * as Notifications from 'expo-notifications';
 import { SchedulableTriggerInputTypes } from 'expo-notifications';
 
 import type { Item } from '../store/types';
+import { cancelNativeAlarm, scheduleNativeAlarm } from './nativeAlarm';
 
 const TZ = 'Asia/Bangkok';
 // byday code → weekday number (expo WEEKLY: 1=Sunday … 7=Saturday)
@@ -43,7 +44,12 @@ function bkkParts(iso: string): Parts {
 export async function scheduleForItem(item: Item): Promise<string[]> {
   if (Platform.OS === 'web') return [];
   // Notes never alarm; anything without a time can't be scheduled.
-  if (item.type === 'note' || !item.start_at) return [];
+  if (item.done || item.type === 'note' || !item.start_at) return [];
+
+  if (item.type === 'reminder' && item.alert_mode === 'alarm') {
+    const nativeId = await scheduleNativeAlarm(item);
+    if (nativeId) return [`alarm:${nativeId}`];
+  }
 
   const p = bkkParts(item.start_at);
   // For an all-day item with no explicit time, nudge at 08:00.
@@ -57,17 +63,56 @@ export async function scheduleForItem(item: Item): Promise<string[]> {
   };
   const content: Notifications.NotificationContentInput = {
     title: item.title,
-    body: bodyByType[item.type] ?? 'แจ้งเตือน',
-    sound: 'default',
+    body:
+      item.alert_mode === 'alarm'
+        ? 'โหมดนาฬิกาปลุก · แตะเพื่อเปิดแอป'
+        : (bodyByType[item.type] ?? 'แจ้งเตือน'),
+    sound: item.alert_mode === 'alarm' && Platform.OS === 'ios' ? 'defaultRingtone' : 'default',
+    interruptionLevel: item.alert_mode === 'alarm' ? 'timeSensitive' : 'active',
+    priority:
+      item.alert_mode === 'alarm'
+        ? Notifications.AndroidNotificationPriority.MAX
+        : Notifications.AndroidNotificationPriority.HIGH,
+    data: {
+      itemId: item.id,
+      alertMode: item.alert_mode,
+      remindUntilDone: item.remind_until_done,
+    },
   };
 
-  const triggers = buildTriggers(item, { ...p, hour, minute });
+  const channelId = item.alert_mode === 'alarm' ? 'alarm-fallback' : 'default';
+  const triggers = buildTriggers(item, { ...p, hour, minute }, channelId);
   const ids: string[] = [];
   for (const trigger of triggers) {
     try {
-      ids.push(await Notifications.scheduleNotificationAsync({ content, trigger }));
+      const id = await Notifications.scheduleNotificationAsync({ content, trigger });
+      ids.push(`notification:${id}`);
     } catch {
       /* native module missing / past date — skip this trigger */
+    }
+  }
+
+
+  // When native alarm APIs are unavailable, a one-shot "until done" reminder
+  // still repeats as prominent notifications. Every pending attempt is kept in
+  // notificationIds, so tapping Done in the app can cancel the rest.
+  if (item.remind_until_done && !item.recurrence) {
+    const first = new Date(item.start_at).getTime();
+    for (let attempt = 2; attempt <= item.max_attempts; attempt += 1) {
+      const date = new Date(first + (attempt - 1) * item.snooze_minutes * 60_000);
+      if (date.getTime() <= Date.now()) continue;
+      try {
+        const id = await Notifications.scheduleNotificationAsync({
+          content: {
+            ...content,
+            body: `ยังไม่ได้ยืนยันว่าทำแล้ว · รอบ ${attempt}/${item.max_attempts}`,
+          },
+          trigger: { type: SchedulableTriggerInputTypes.DATE, date, channelId },
+        });
+        ids.push(`notification:${id}`);
+      } catch {
+        /* keep the base notification even if one repeat could not be scheduled */
+      }
     }
   }
   return ids;
@@ -76,6 +121,7 @@ export async function scheduleForItem(item: Item): Promise<string[]> {
 function buildTriggers(
   item: Item,
   p: Parts,
+  channelId: string,
 ): Notifications.NotificationTriggerInput[] {
   const r = item.recurrence;
 
@@ -83,12 +129,12 @@ function buildTriggers(
     // one-shot — skip if already in the past
     const when = new Date(item.start_at as string);
     if (when.getTime() <= Date.now()) return [];
-    return [{ type: SchedulableTriggerInputTypes.DATE, date: when }];
+    return [{ type: SchedulableTriggerInputTypes.DATE, date: when, channelId }];
   }
 
   switch (r.freq) {
     case 'daily':
-      return [{ type: SchedulableTriggerInputTypes.DAILY, hour: p.hour, minute: p.minute }];
+      return [{ type: SchedulableTriggerInputTypes.DAILY, hour: p.hour, minute: p.minute, channelId }];
     case 'weekly': {
       // one weekly trigger per selected day; fall back to the start day
       const days = r.byday?.length ? r.byday : weekdayCode(p.weekday);
@@ -97,11 +143,12 @@ function buildTriggers(
         weekday: DAY_TO_WEEKDAY[code] ?? p.weekday,
         hour: p.hour,
         minute: p.minute,
+        channelId,
       }));
     }
     case 'monthly':
       return [
-        { type: SchedulableTriggerInputTypes.MONTHLY, day: p.day, hour: p.hour, minute: p.minute },
+        { type: SchedulableTriggerInputTypes.MONTHLY, day: p.day, hour: p.hour, minute: p.minute, channelId },
       ];
     case 'yearly':
       return [
@@ -111,6 +158,7 @@ function buildTriggers(
           month: p.month - 1, // expo YEARLY month is 0-indexed
           hour: p.hour,
           minute: p.minute,
+          channelId,
         },
       ];
     default:
@@ -127,8 +175,15 @@ function weekdayCode(weekday: number): string[] {
 export async function cancelNotifications(ids: string[]): Promise<void> {
   if (Platform.OS === 'web') return;
   for (const id of ids) {
+    if (id.startsWith('alarm:')) {
+      await cancelNativeAlarm(id.slice('alarm:'.length));
+      continue;
+    }
     try {
-      await Notifications.cancelScheduledNotificationAsync(id);
+      const notificationId = id.startsWith('notification:')
+        ? id.slice('notification:'.length)
+        : id;
+      await Notifications.cancelScheduledNotificationAsync(notificationId);
     } catch {
       /* already gone */
     }

@@ -32,9 +32,12 @@ const REFERENTS = [
 const SYSTEM = `คุณคือ "สมอง" ของแอปผู้ช่วยเสียงภาษาไทย แปลงคำพูดเป็น action plan JSON ตัวเดียว ห้ามมีข้อความอื่น
 timezone Asia/Bangkok, datetime เป็น ISO+07:00
 tool: create_reminder|create_event|create_todo|create_note|record_expense|query|update_item|delete_item
-ฟิลด์: tool,title,body,datetime,end_datetime,all_day,recurrence,amount,query_kind,people,target_ref,done
+ฟิลด์: tool,title,body,datetime,end_datetime,all_day,recurrence,alert_mode,remind_until_done,snooze_minutes,max_attempts,amount,query_kind,people,target_ref,done
 - update_item = แก้/เลื่อน/ทำเสร็จ ของรายการเดิม; delete_item = ยกเลิก/ลบ — ต้องใส่ target_ref จาก "รายการอ้างอิง"
 - ใส่เฉพาะฟิลด์ที่เปลี่ยน (เช่น datetime ใหม่ หรือ done=true)
+- ถ้าผู้ใช้ขอเปลี่ยนเป็นนาฬิกาปลุกให้ alert_mode="alarm"; ถ้าเป็นแจ้งเตือนให้ "notification"
+- ถ้าขอเตือนจนกว่าจะทำ ให้ alert_mode="alarm", remind_until_done=true; snooze_minutes รองรับ 5/10/30
+- "เลื่อนปลุก/Snooze X นาที" เปลี่ยน snooze_minutes เท่านั้น ห้ามขยับ datetime; ขยับเวลาต่อเมื่อบอกเลื่อนรายการไปเวลาใหม่
 - "อันแรก"=ลำดับ1, "อันเมื่อกี้/อันสุดท้าย"=ลำดับล่าสุด, หรือจับจากชื่อ ("จ่ายเน็ตแล้ว"=รายการเน็ต)
 - ถ้ามี ISO ใน {..} ให้ยึดวันเดิมแล้วเปลี่ยนเฉพาะเวลา
 - speak_back สั้น ๆ. ตอบ JSON: {"actions":[...],"speak_back":"..."}`;
@@ -73,6 +76,9 @@ for (const text of inputs) {
       const bits = [a.tool, a.target_ref ? `→${a.target_ref}` : '', a.title].filter(Boolean).join(' ');
       console.log(`   → ${bits}`);
       if (a.datetime) console.log(`       datetime: ${a.datetime}`);
+      if (a.alert_mode) console.log(`       alert_mode: ${a.alert_mode}`);
+      if (a.remind_until_done != null) console.log(`       remind_until_done: ${a.remind_until_done}`);
+      if (a.snooze_minutes) console.log(`       snooze: ${a.snooze_minutes}m × ${a.max_attempts ?? 5}`);
       if (a.done != null) console.log(`       done: ${a.done}`);
     }
     console.log(`   🔊 ${plan.speak_back}\n`);

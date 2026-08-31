@@ -20,6 +20,7 @@ export function actionToItem(a: BrainAction, rawText?: string): Item | null {
   if (!type) return null;
 
   const now = new Date().toISOString();
+  const remindUntilDone = type === 'reminder' && a.remind_until_done === true;
   return {
     id: makeId(),
     type,
@@ -29,6 +30,11 @@ export function actionToItem(a: BrainAction, rawText?: string): Item | null {
     end_at: a.end_datetime,
     all_day: a.all_day,
     recurrence: a.recurrence,
+    alert_mode:
+      type === 'reminder' ? (remindUntilDone ? 'alarm' : (a.alert_mode ?? 'notification')) : 'notification',
+    remind_until_done: remindUntilDone,
+    snooze_minutes: type === 'reminder' ? (a.snooze_minutes ?? 10) : 10,
+    max_attempts: type === 'reminder' ? (a.max_attempts ?? 5) : 5,
     done: false,
     created_at: now,
     updated_at: now,

@@ -24,6 +24,12 @@ export interface Recurrence {
   interval: number;
 }
 
+/** How a timed reminder should get the user's attention. */
+export type AlertMode = 'notification' | 'alarm';
+
+/** Supported snooze choices shown in the app/native alarm UI. */
+export type SnoozeMinutes = 5 | 10 | 30;
+
 export type QueryKind = 'list_today' | 'list_range' | 'search' | null;
 
 export interface BrainAction {
@@ -36,6 +42,14 @@ export interface BrainAction {
   end_datetime: string | null;
   all_day: boolean;
   recurrence: Recurrence | null;
+  /** เฉพาะ reminder/update_item; null = ใช้ notification ตามค่าเริ่มต้น */
+  alert_mode: AlertMode | null;
+  /** true = ปลุกซ้ำจนผู้ใช้กด "ทำแล้ว" (บังคับใช้ alarm mode) */
+  remind_until_done: boolean | null;
+  /** ระยะเวลาเลื่อนปลุก; รองรับ 5/10/30 นาที */
+  snooze_minutes: SnoozeMinutes | null;
+  /** จำนวนรอบเตือนรวม (รอบแรกนับเป็น 1) */
+  max_attempts: number | null;
   /** เฉพาะ record_expense (บาท) */
   amount: number | null;
   /** เฉพาะ query */

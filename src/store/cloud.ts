@@ -1,7 +1,7 @@
 // Supabase data gateway for items. Notification IDs deliberately never cross
 // this boundary: each device creates and owns its local notification schedule.
 
-import type { Recurrence } from '../brain/types';
+import type { AlertMode, Recurrence, SnoozeMinutes } from '../brain/types';
 import { supabase } from '../lib/supabase';
 import type { Item, ItemType } from './types';
 
@@ -15,6 +15,10 @@ export interface CloudItemRow {
   end_at: string | null;
   all_day: boolean;
   recurrence: Recurrence | null;
+  alert_mode: AlertMode;
+  remind_until_done: boolean;
+  snooze_minutes: SnoozeMinutes;
+  max_attempts: number;
   people: string[] | null;
   raw_text: string | null;
   done: boolean;
@@ -38,6 +42,11 @@ export function rowToItem(row: CloudItemRow): Item {
     end_at: row.end_at,
     all_day: row.all_day,
     recurrence: row.recurrence,
+    alert_mode: row.remind_until_done ? 'alarm' : (row.alert_mode ?? 'notification'),
+    remind_until_done: row.remind_until_done ?? false,
+    snooze_minutes:
+      row.snooze_minutes === 5 || row.snooze_minutes === 30 ? row.snooze_minutes : 10,
+    max_attempts: row.max_attempts ?? 5,
     people: row.people ?? undefined,
     raw_text: row.raw_text ?? undefined,
     done: row.done,
@@ -68,6 +77,10 @@ export async function upsertCloudItem(item: Item): Promise<void> {
     p_end_at: item.end_at,
     p_all_day: item.all_day,
     p_recurrence: item.recurrence,
+    p_alert_mode: item.alert_mode,
+    p_remind_until_done: item.remind_until_done,
+    p_snooze_minutes: item.snooze_minutes,
+    p_max_attempts: item.max_attempts,
     p_people: item.people ?? null,
     p_raw_text: item.raw_text ?? null,
     p_done: item.done,

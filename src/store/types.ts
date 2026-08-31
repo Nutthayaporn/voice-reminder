@@ -3,7 +3,7 @@
 // table, no separate holidays table). Mirrors the planned Supabase `items`
 // schema in docs/ARCHITECTURE.md so cloud sync later is a straight mapping.
 
-import type { Recurrence } from '../brain/types';
+import type { AlertMode, Recurrence, SnoozeMinutes } from '../brain/types';
 
 export type ItemType = 'reminder' | 'event' | 'todo' | 'note';
 
@@ -19,6 +19,14 @@ export interface Item {
   all_day: boolean;
   /** repeat rule; null = one-shot. */
   recurrence: Recurrence | null;
+  /** notification = banner ปกติ, alarm = OS alarm (fallback เป็น notification ได้). */
+  alert_mode: AlertMode;
+  /** Alarm ที่ไม่มีปุ่มหยุดเฉย ๆ: ต้องกดทำแล้วหรือเลื่อนปลุก. */
+  remind_until_done: boolean;
+  /** Default snooze duration for the native alarm. */
+  snooze_minutes: SnoozeMinutes;
+  /** Maximum total alert attempts, including the first alert. */
+  max_attempts: number;
   done: boolean;
   created_at: string;
   /** ISO timestamp of the last local edit; conflict key for cloud LWW merge. */

@@ -57,6 +57,9 @@ timezone อ้างอิงคือ Asia/Bangkok เสมอ ทุก date
       "title": string, "body": string|null,
       "datetime": string|null, "end_datetime": string|null, "all_day": boolean,
       "recurrence": null | { "freq":"daily"|"weekly"|"monthly"|"yearly", "byday": ["MO".."SU"]|null, "interval": number },
+      "alert_mode": "notification"|"alarm"|null,
+      "remind_until_done": boolean|null, "snooze_minutes": 5|10|30|null,
+      "max_attempts": number|null,
       "amount": number|null, "query_kind": "list_today"|"list_range"|"search"|null,
       "people": ["ชื่อ"]|null
     }
@@ -67,6 +70,10 @@ timezone อ้างอิงคือ Asia/Bangkok เสมอ ทุก date
 }
 กติกา:
 - create_todo = สิ่งที่ต้องทำแต่ไม่ระบุเวลาเตือน; ถ้ามีเวลาเตือนให้เพิ่ม create_reminder อีก action
+- create_reminder: "ปลุก/นาฬิกาปลุก" => alert_mode="alarm"; "แจ้งเตือน/เด้งเตือน" หรือไม่ระบุ => "notification"
+- "เตือนจนกว่าจะทำ/อย่าหยุดเตือน/ขี้ลืม" => alert_mode="alarm", remind_until_done=true
+- snooze_minutes default 10, max_attempts default 5; ถ้าระบุให้รองรับ snooze 5/10/30 นาทีและจำนวนรอบ 1–20
+- "เลื่อนปลุก/Snooze X นาที" เปลี่ยน snooze_minutes เท่านั้น ห้ามขยับ datetime
 - create_note = ไดอารี่/ความทรงจำ ใส่ people ถ้ามีคนเกี่ยวข้อง
 - query_kind="search" = ค้นความทรงจำย้อนหลัง (เช่น "ลูกเริ่มพูดเมื่อไหร่") ใส่คำถามใน title
 - query_kind="list_range" = ถามช่วง (เช่น "พรุ่งนี้มีอะไร") ต้องใส่ datetime=ต้นช่วง, end_datetime=ท้ายช่วง (ISO+07:00)
@@ -119,6 +126,9 @@ for (const text of inputs) {
       console.log(`   → ${bits}`);
       if (a.datetime) console.log(`       ${a.datetime}${a.end_datetime ? ` → ${a.end_datetime}` : ''}`);
       if (a.recurrence) console.log(`       recurrence: ${JSON.stringify(a.recurrence)}`);
+      if (a.alert_mode) console.log(`       alert_mode: ${a.alert_mode}`);
+      if (a.remind_until_done != null) console.log(`       remind_until_done: ${a.remind_until_done}`);
+      if (a.snooze_minutes) console.log(`       snooze: ${a.snooze_minutes}m × ${a.max_attempts ?? 5}`);
       if (a.amount != null) console.log(`       amount: ${a.amount}`);
       if (a.query_kind) console.log(`       query_kind: ${a.query_kind}`);
       if (a.people?.length) console.log(`       people: ${a.people.join(', ')}`);

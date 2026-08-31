@@ -7,7 +7,16 @@
 
 import { config } from '../config';
 import { buildMessages } from './prompt';
-import type { BrainAction, BrainContext, BrainPlan, QueryKind, Recurrence, ToolName } from './types';
+import type {
+  AlertMode,
+  BrainAction,
+  BrainContext,
+  BrainPlan,
+  QueryKind,
+  Recurrence,
+  SnoozeMinutes,
+  ToolName,
+} from './types';
 
 const ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
 
@@ -98,6 +107,10 @@ function coerceAction(v: unknown): BrainAction | null {
     end_datetime: strOrNull(a.end_datetime),
     all_day: a.all_day === true,
     recurrence: recurrence(a.recurrence),
+    alert_mode: alertMode(a.alert_mode),
+    remind_until_done: typeof a.remind_until_done === 'boolean' ? a.remind_until_done : null,
+    snooze_minutes: snoozeMinutes(a.snooze_minutes),
+    max_attempts: maxAttempts(a.max_attempts),
     amount: typeof a.amount === 'number' ? a.amount : null,
     query_kind: queryKind(a.query_kind),
     people: stringArray(a.people),
@@ -122,6 +135,17 @@ function strOrNull(v: unknown): string | null {
 }
 function queryKind(v: unknown): QueryKind {
   return v === 'list_today' || v === 'list_range' || v === 'search' ? v : null;
+}
+function alertMode(v: unknown): AlertMode | null {
+  return v === 'notification' || v === 'alarm' ? v : null;
+}
+function snoozeMinutes(v: unknown): SnoozeMinutes | null {
+  return v === 5 || v === 10 || v === 30 ? v : null;
+}
+function maxAttempts(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v)
+    ? Math.max(1, Math.min(20, Math.round(v)))
+    : null;
 }
 function recurrence(v: unknown): Recurrence | null {
   if (!v || typeof v !== 'object') return null;
