@@ -5,7 +5,7 @@
 
 import type { Recurrence } from '../brain/types';
 
-export type ItemType = 'reminder' | 'event' | 'note';
+export type ItemType = 'reminder' | 'event' | 'todo' | 'note';
 
 export interface Item {
   id: string;
@@ -23,4 +23,11 @@ export interface Item {
   created_at: string;
   /** ids returned by expo-notifications, kept so we can cancel on delete. */
   notificationIds: string[];
+
+  // ── Memory layer (semantic recall) ──────────────────────────────────────
+  /** The original spoken sentence, verbatim. Powers "what did I say" recall and
+   *  keeps nuance the concise `title` drops. Optional (older rows lack it). */
+  raw_text?: string;
+  /** People mentioned ("ลูก", "แม่") — extracted by the brain for notes. */
+  people?: string[];
 }

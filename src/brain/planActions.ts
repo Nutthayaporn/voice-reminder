@@ -1,0 +1,143 @@
+// Runs the planning LLM (Groq, JSON mode) and returns a normalised BrainPlan
+// (a list of actions + one spoken reply). Validates defensively — an LLM can
+// always return something unexpected.
+//
+// SECURITY: same caveat as cloudGroq — the key is bundled. Move server-side
+// (Supabase Edge Function) before shipping.
+
+import { config } from '../config';
+import { buildMessages } from './prompt';
+import type { BrainAction, BrainContext, BrainPlan, QueryKind, Recurrence, ToolName } from './types';
+
+const ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
+
+const VALID_TOOLS: ToolName[] = [
+  'create_reminder',
+  'create_event',
+  'create_todo',
+  'create_note',
+  'record_expense',
+  'query',
+  'update_item',
+  'delete_item',
+];
+
+export async function planActions(
+  text: string,
+  now: Date = new Date(),
+  context?: BrainContext,
+): Promise<BrainPlan> {
+  if (!config.groqApiKey) {
+    throw new Error('ยังไม่ได้ตั้งค่า Groq API key (EXPO_PUBLIC_GROQ_API_KEY)');
+  }
+
+  const res = await fetch(ENDPOINT, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.groqApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: config.groq.llmModel,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: buildMessages(text, now, context),
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`Groq LLM ล้มเหลว (${res.status}) ${detail}`.trim());
+  }
+
+  const data = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return normalise(data.choices?.[0]?.message?.content ?? '{}');
+}
+
+function normalise(raw: string): BrainPlan {
+  let obj: Record<string, unknown> = {};
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return {
+      actions: [],
+      speak_back: 'ขอโทษครับ ผมยังไม่เข้าใจ ลองพูดใหม่อีกครั้งได้ไหมครับ',
+      needs_clarification: false,
+      clarify_question: null,
+    };
+  }
+
+  const rawActions = Array.isArray(obj.actions) ? obj.actions : [];
+  const actions = rawActions
+    .map(coerceAction)
+    .filter((a): a is BrainAction => a !== null);
+
+  const needsClarify = obj.needs_clarification === true;
+  const clarify = strOrNull(obj.clarify_question);
+  const speak = str(obj.speak_back) || (actions.length ? 'รับทราบครับ' : 'ครับ ว่ามาได้เลย');
+  return {
+    actions,
+    speak_back: speak,
+    // Only treat it as a real clarification if we actually have a question.
+    needs_clarification: needsClarify && !!clarify,
+    clarify_question: clarify,
+  };
+}
+
+function coerceAction(v: unknown): BrainAction | null {
+  if (!v || typeof v !== 'object') return null;
+  const a = v as Record<string, unknown>;
+  if (!VALID_TOOLS.includes(a.tool as ToolName)) return null;
+  return {
+    tool: a.tool as ToolName,
+    title: str(a.title),
+    body: strOrNull(a.body),
+    datetime: strOrNull(a.datetime),
+    end_datetime: strOrNull(a.end_datetime),
+    all_day: a.all_day === true,
+    recurrence: recurrence(a.recurrence),
+    amount: typeof a.amount === 'number' ? a.amount : null,
+    query_kind: queryKind(a.query_kind),
+    people: stringArray(a.people),
+    target_ref: strOrNull(a.target_ref),
+    done: typeof a.done === 'boolean' ? a.done : null,
+  };
+}
+
+function stringArray(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  const arr = v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0);
+  return arr.length ? arr.map((s) => s.trim()) : null;
+}
+
+// ---- coercers ----------------------------------------------------------
+function str(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : '';
+}
+function strOrNull(v: unknown): string | null {
+  const s = str(v);
+  return s.length ? s : null;
+}
+function queryKind(v: unknown): QueryKind {
+  return v === 'list_today' || v === 'list_range' || v === 'search' ? v : null;
+}
+function recurrence(v: unknown): Recurrence | null {
+  if (!v || typeof v !== 'object') return null;
+  const r = v as Record<string, unknown>;
+  const freq = r.freq;
+  if (freq !== 'daily' && freq !== 'weekly' && freq !== 'monthly' && freq !== 'yearly') {
+    return null;
+  }
+  const days = Array.isArray(r.byday)
+    ? (r.byday.filter((d) =>
+        ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'].includes(d as string),
+      ) as Recurrence['byday'])
+    : null;
+  return {
+    freq,
+    byday: days && days.length ? days : null,
+    interval: typeof r.interval === 'number' && r.interval > 0 ? r.interval : 1,
+  };
+}

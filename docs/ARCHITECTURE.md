@@ -33,8 +33,15 @@ speech-recognition) แล้วค่อย *แตกทางใน start()/s
 
 ## 3. Phase 1 — "The Brain" (ยังไม่ทำ) 
 
-> **สถานะ: ทำแล้ว** — ดู `src/brain/` (`prompt.ts`, `parseIntent.ts`, `format.ts`)
-> และเทสต์จาก terminal ด้วย `node scripts/test-brain.mjs`
+> **สถานะ: ทำแล้ว + อัปเกรดเป็น Action Plan** — ดู `src/brain/` (`prompt.ts`,
+> `planActions.ts`, `toItem.ts`, `format.ts`) เทสต์ด้วย `node scripts/test-brain.mjs`
+
+**อัปเกรดสำคัญ (จาก design review กับ ChatGPT): 1 ประโยค → หลาย action.**
+สมองไม่คืน intent เดียวแล้ว แต่คืน **action plan** = ลิสต์ของ tool call + คำพูดตอบรวม 1 ประโยค
+เพราะประโยคเดียวอาจมีหลายคำสั่ง เช่น "1–2 ก.ย. พ่อแม่ไปขายของ **เตือนก่อน 1 วัน**" =
+create_event + create_reminder. ชุด tool: `create_reminder`, `create_event`, `create_todo`,
+`create_note`, `record_expense`, `query` (todo แยกจาก reminder — todo อาจไม่มีเวลา).
+App เป็น router: วน execute ทุก action (save+schedule / query / expense handoff).
 
 หลังได้ transcript ส่งเข้า Groq LLM (`openai/gpt-oss-120b`, ตั้งใน `config.groq.llmModel`)
 แบบ **JSON mode** (`response_format: json_object`) คืน object เช่น:
@@ -44,22 +51,63 @@ speech-recognition) แล้วค่อย *แตกทางใน start()/s
 > (เดิมวางไว้เป็น `llama-3.3-70b-versatile` แต่ key ปัจจุบันไม่มี จึงเปลี่ยนเป็น gpt-oss)
 
 ```jsonc
-// input: "ตั้งปลุกทุกวัน 8 โมง ยกเว้นเสาร์อาทิตย์"
+// input: "1 ถึง 2 กันยา พ่อแม่ไปขายของ เตือนผมก่อน 1 วัน"
 {
-  "intent": "create_reminder",
-  "title": "ตั้งปลุก",
-  "time": "08:00",
-  "recurrence": { "freq": "weekly", "byday": ["MO","TU","WE","TH","FR"] },
-  "speak_back": "ตั้งปลุกทุกวันจันทร์ถึงศุกร์ 8 โมงเช้าให้แล้วนะครับ"
+  "actions": [
+    { "tool": "create_event", "title": "พ่อแม่ไปขายของ",
+      "datetime": "2026-09-01T00:00:00+07:00", "end_datetime": "2026-09-02T23:59:59+07:00",
+      "all_day": true, "recurrence": null, "amount": null, "query_kind": null, "body": null },
+    { "tool": "create_reminder", "title": "พ่อแม่ไปขายของ",
+      "datetime": "2026-08-31T09:00:00+07:00", "end_datetime": null,
+      "all_day": false, "recurrence": null, "amount": null, "query_kind": null, "body": null }
+  ],
+  "speak_back": "ได้ครับ เดี๋ยวเตือนก่อนหนึ่งวัน"
 }
 ```
 
 **สิ่งที่ต้องใส่ใน system prompt เสมอ:** วันที่/เวลาปัจจุบัน + `timezone: Asia/Bangkok`
-เพื่อให้ตีความ "พรุ่งนี้ / เดือนนี้ / 1–2 Sep" เป็นวันจริงได้ถูก
+เพื่อให้ตีความ "พรุ่งนี้ / เดือนนี้ / 1–2 Sep / ก่อน 1 วัน" เป็นวันจริงได้ถูก
 
-ชุด intent ที่วางไว้: `create_reminder`, `create_event`, `create_note`, `query`,
-`add_expense` (อนาคต) แต่ละ intent → handler ใน "intent router" (ยังไม่มีไฟล์ ให้สร้าง
-`src/brain/`)
+App ทำหน้าที่ router: วน `plan.actions` แล้ว create_* → save+schedule, `query` → ตอบจาก
+store (ทับ speak_back เพราะเป็น data-driven), `record_expense` → deep link ไป daily-budget
+
+### 3b. Semantic memory (ไดอารี่ที่ถามย้อนหลังได้) — `src/brain/searchMemory.ts`
+
+นี่คือ differentiator ที่ทำให้ต่างจาก Siri/Calendar: "ลูกเริ่มพูดได้เมื่อไหร่" ตอบได้แม้บันทึก
+ใช้คำคนละคำ ("วันแรกที่ลูกพูด"). กลไก:
+- ตอนบันทึก note: เก็บ `raw_text` (ประโยคเต็มที่พูด, verbatim) + `people[]` (สมองสกัดให้) ลง `Item`
+- ตอนถาม: สมองตั้ง `query_kind="search"` → App เรียก `searchMemory(question, items)`
+- **LLM-as-retriever** (ไม่ใช่ embedding): Groq **ไม่มี** embedding model และไดอารี่ส่วนตัวเล็ก
+  (หลักสิบ-ร้อย) จึงส่งบันทึกทั้งหมด (cap 200 รายการล่าสุด) + คำถามให้ gpt-oss หาคำตอบ ถูก
+  กว่าและง่ายกว่าการตั้ง vector store — **swap เป็น embedding index ทีหลังได้ที่ signature เดิม**
+- ถ้าไม่พบ ตอบ "ไม่พบบันทึก" (prompt สั่งห้ามเดา) — กัน hallucination
+- เทสต์: `node scripts/test-memory.mjs` (มี fake diary ในตัว)
+
+### 3c. Multi-turn context (อ้างถึงรายการเดิม) — `update_item` / `delete_item`
+
+ให้พูดต่อเนื่องแบบคน: "เลื่อนอันแรกไป 11 โมง", "ยกเลิกอันเมื่อกี้", "จ่ายเน็ตแล้ว". กลไก:
+- App เก็บ `contextRef: BrainContext` (ใน `useRef`, ไม่ trigger render) = **referents** ของเทิร์นก่อน
+  — รายการที่ผู้ใช้อ้างถึงได้ พร้อม `ref`=item id และ label (รวม ISO ใน `{...}` เพื่อให้แก้เวลา
+  โดยคงวันเดิมได้). อัปเดตท้ายทุกเทิร์น: ถ้าเพิ่ง list → referents = ผลลิสต์ (เรียงตามที่พูด),
+  ไม่งั้น = ของที่เพิ่งสร้าง, ไม่งั้น = item ล่าสุด
+- ส่ง referents เข้า prompt ทุกครั้ง (`buildMessages(text, now, context)`) สมองแปล "อันแรก"=ลำดับ1,
+  "อันเมื่อกี้"=ล่าสุด, หรือจับจากชื่อ → คืน `update_item`/`delete_item` พร้อม `target_ref`
+- App resolve `target_ref` → item จริง แล้ว **reschedule notification** ถ้าเวลา/recurrence เปลี่ยน
+  (cancel ของเก่าก่อน กันเด้งซ้ำ). done=true = ทำเครื่องหมายเสร็จ ("จ่ายเน็ตแล้ว")
+- เทสต์: `node scripts/test-context.mjs`
+- ยังเป็น context แบบ 1 เทิร์น (referents ล่าสุด) พอสำหรับ use case จริง; ยังไม่เก็บ transcript
+  ประวัติยาว — ถ้าต้องอ้างข้ามหลายเทิร์นค่อยขยาย
+
+### 3d. Confirmation เมื่อไม่มั่นใจ — `needs_clarification`
+
+ไม่เดาเวลาเมื่อผู้ใช้บอกกว้าง ("เตือนกินยาเช้า"). กลไก (ออกแบบให้ **ไม่ถามพร่ำเพรื่อ** — ถาม
+เฉพาะ create_reminder ที่เวลากว้างจริง ๆ):
+- สมองคืน `needs_clarification=true` + `clarify_question` ("ประมาณกี่โมงครับ"), `actions=[]`
+- App พูดคำถาม แล้วเก็บประโยคเดิมไว้ใน `contextRef.pending` (ไม่ execute)
+- เทิร์นถัดไป ("8 โมง") ส่ง pending เข้า prompt → สมอง "รวม" pending+คำตอบ เป็น action สมบูรณ์
+  (`needs_clarification=false`) → App execute แล้ว pending ถูกล้างอัตโนมัติ (executePlan reset context)
+- เทสต์: `node scripts/test-brain.mjs "เตือนกินยาพรุ่งนี้เช้า"` (ต้องถาม), เวลาที่ชัดจะไม่ถาม
+- ทางต่อยอด (ChatGPT แนะ): เรียนรู้ default ของผู้ใช้ (เช่น "เช้า"=08:00) แล้วเลิกถาม
 
 ## 4. Phase 2 — Data model + การเตือน
 

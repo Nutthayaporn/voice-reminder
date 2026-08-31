@@ -4,9 +4,9 @@
 บันทึก และ **ตอบกลับด้วยเสียง** เกิดมาแก้ pain point เดียว: *อยากจดแต่ขี้เกียจพิมพ์เพราะมือ
 ไม่ว่าง*
 
-> สถานะปัจจุบัน: **Phase 0 — Speech playground** (พิสูจน์ลูป พูด → ถอดเสียง → ตอบกลับ
-> พร้อมสวิตช์เทียบ engine cloud/on-device) ยังไม่มีการบันทึกหรือ "สมอง" ที่เข้าใจ intent
-> ดู roadmap ด้านล่าง
+> สถานะปัจจุบัน: **Phase 0–4 เสร็จ (MVP ครบวง)** — พูด → เข้าใจ → บันทึก → เตือน → ตอบ
+> และต่อ daily-budget แล้ว. สมองอัปเกรดเป็น **Action Plan** (1 ประโยคทำได้หลายคำสั่ง) +
+> มี type `todo`. ดู roadmap ด้านล่าง
 
 ---
 
@@ -44,11 +44,11 @@
            │ text (ไทย)
            ▼
 ┌──────────────────────────┐
-│  🧠 The Brain (Phase 1)   │  LLM function-calling → intent + payload (ยังไม่ทำ)
+│  🧠 The Brain             │  Groq LLM (JSON) → action plan (หลาย action ต่อ 1 ประโยค)
 └──────────┬───────────────┘
-           │ intent
+           │ actions[]
            ▼
-   Supabase + expo-notifications (Phase 2)  →  สรุปผล
+   local store (zustand) + expo-notifications  →  execute ทุก action
            │
            ▼
    🔊 TTS (src/speech/tts.ts) พูดตอบกลับ
@@ -66,9 +66,10 @@
 | `src/speech/tts.ts` | พูดตอบกลับด้วยเสียง OS (expo-speech) |
 | `src/speech/engines.ts` | รายการ engine + คำนวณว่าตัวไหนใช้ได้ตอนนี้ |
 | `src/brain/prompt.ts` | สร้าง prompt ให้ LLM (แนบวันที่/timezone ปัจจุบันเสมอ) |
-| `src/brain/parseIntent.ts` | เรียก Groq LLM (JSON mode) → คืน intent ที่ normalise แล้ว |
-| `src/brain/format.ts` | แปลง intent เป็นข้อความไทยสวย ๆ สำหรับแสดงผล |
-| `src/brain/toItem.ts` | แปลง intent (create_*) → `Item` ที่บันทึกได้ |
+| `src/brain/planActions.ts` | เรียก Groq LLM (JSON mode) → คืน **action plan** ที่ normalise แล้ว |
+| `src/brain/format.ts` | แปลง action เป็นข้อความไทยสวย ๆ สำหรับแสดงผล |
+| `src/brain/toItem.ts` | แปลง action (create_*) → `Item` ที่บันทึกได้ (เก็บ raw_text + people) |
+| `src/brain/searchMemory.ts` | ค้นความทรงจำย้อนหลัง (LLM-as-retriever) "ลูกเริ่มพูดเมื่อไหร่" |
 | `src/store/useStore.ts` | store local-first (zustand + AsyncStorage) เก็บ `items` |
 | `src/store/query.ts` | ตอบคำถาม "วันนี้มีอะไร" จาก items ในเครื่อง |
 | `src/notify/scheduler.ts` | แปลง item.recurrence → local notification triggers |

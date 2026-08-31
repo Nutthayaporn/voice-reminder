@@ -14,6 +14,7 @@ interface StoreState {
   addItem: (item: Item) => void;
   removeItem: (id: string) => void;
   toggleDone: (id: string) => void;
+  updateItem: (id: string, patch: Partial<Item>) => void;
 }
 
 export const useStore = create<StoreState>()(
@@ -26,6 +27,10 @@ export const useStore = create<StoreState>()(
       toggleDone: (id) =>
         set((s) => ({
           items: s.items.map((i) => (i.id === id ? { ...i, done: !i.done } : i)),
+        })),
+      updateItem: (id, patch) =>
+        set((s) => ({
+          items: s.items.map((i) => (i.id === id ? { ...i, ...patch } : i)),
         })),
     }),
     {

@@ -1,35 +1,41 @@
-// Convert a BrainResult (LLM interpretation) into a storable Item.
-// Only the create_* intents map to items; query/add_expense/unknown do not.
+// Convert a single BrainAction into a storable Item.
+// Only the create_* tools map to items; record_expense/query do not.
 
-import type { BrainResult } from './types';
+import type { BrainAction } from './types';
 import type { Item, ItemType } from '../store/types';
 
-const INTENT_TO_TYPE: Record<string, ItemType> = {
+const TOOL_TO_TYPE: Record<string, ItemType> = {
   create_reminder: 'reminder',
   create_event: 'event',
+  create_todo: 'todo',
   create_note: 'note',
 };
 
-/** null when this intent shouldn't be persisted (query/add_expense/unknown). */
-export function brainToItem(b: BrainResult): Item | null {
-  const type = INTENT_TO_TYPE[b.intent];
+/**
+ * null when this action shouldn't be persisted (record_expense/query).
+ * @param rawText the original spoken sentence, kept verbatim for memory recall.
+ */
+export function actionToItem(a: BrainAction, rawText?: string): Item | null {
+  const type = TOOL_TO_TYPE[a.tool];
   if (!type) return null;
 
   return {
     id: makeId(),
     type,
-    title: b.title,
-    body: b.body,
-    start_at: b.datetime,
-    end_at: b.end_datetime,
-    all_day: b.all_day,
-    recurrence: b.recurrence,
+    title: a.title,
+    body: a.body,
+    start_at: a.datetime,
+    end_at: a.end_datetime,
+    all_day: a.all_day,
+    recurrence: a.recurrence,
     done: false,
     created_at: new Date().toISOString(),
     notificationIds: [],
+    raw_text: rawText,
+    people: a.people ?? undefined,
   };
 }
 
 function makeId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}${Math.random().toString(36).slice(2, 4)}`;
 }

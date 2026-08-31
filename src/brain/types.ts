@@ -1,46 +1,76 @@
-// "The Brain" — the structured output the LLM must produce from a spoken line.
+// "The Brain" contract — an ACTION PLAN, not a single intent.
 //
-// One flat schema covers every intent; the LLM fills the relevant fields and
-// nulls the rest. Flat (rather than a discriminated union per intent) keeps
-// parsing/rendering trivial and makes adding a field a one-line change. The
-// intent router (Phase 2) switches on `intent`.
+// Key upgrade (from the ChatGPT design review): one utterance can map to
+// MULTIPLE actions. "1–2 ก.ย. พ่อแม่ไปขายของ เตือนผมก่อน 1 วัน" =
+// create_event + create_reminder. So the LLM returns a list of tool calls plus
+// ONE combined spoken reply for the whole utterance.
+//
+// Params are kept as a flat superset (only the relevant ones are filled per
+// tool) so parsing/rendering/routing stay trivial and adding a field is cheap.
 
-export type Intent =
-  | 'create_reminder' // เตือน (มีเวลา, อาจซ้ำ) — "พรุ่งนี้กินยา 9 โมง"
-  | 'create_event' // เหตุการณ์/นัด (อาจเป็นช่วง) — "1–2 Sep พ่อแม่ไปขายของ"
-  | 'create_note' // โน้ต/ไดอารี่ ผูกวันที่ — "วันนี้ลูกพูดได้"
-  | 'query' // ถามข้อมูล — "วันนี้มีอะไรต้องทำบ้าง"
-  | 'add_expense' // (อนาคต) ยิงไป daily-budget — "ซื้อโจ๊ก 60 บาท"
-  | 'unknown'; // ตีความไม่ได้ / คุยเล่น
+export type ToolName =
+  | 'create_reminder' // เตือน (มีเวลา, อาจซ้ำ)
+  | 'create_event' // เหตุการณ์/นัด (อาจเป็นช่วง)
+  | 'create_todo' // งานที่ต้องทำ (อาจไม่มีเวลา; อาจมี reminder แนบ)
+  | 'create_note' // โน้ต/ไดอารี่ ผูกวันที่
+  | 'record_expense' // ยิงไป daily-budget
+  | 'query' // ถามข้อมูลย้อนกลับ
+  | 'update_item' // แก้/เลื่อน/ทำเครื่องหมายเสร็จ ของรายการเดิม (ใช้ target_ref)
+  | 'delete_item'; // ยกเลิก/ลบรายการเดิม (ใช้ target_ref)
 
 export interface Recurrence {
   freq: 'daily' | 'weekly' | 'monthly' | 'yearly';
-  /** สำหรับ weekly: วันในสัปดาห์ (MO..SU). null = ทุกวันตาม freq */
   byday: Array<'MO' | 'TU' | 'WE' | 'TH' | 'FR' | 'SA' | 'SU'> | null;
-  /** ทุก ๆ กี่หน่วย (เช่น interval 2 + weekly = สองสัปดาห์ครั้ง) */
   interval: number;
 }
 
 export type QueryKind = 'list_today' | 'list_range' | 'search' | null;
 
-export interface BrainResult {
-  intent: Intent;
-  /** ป้ายสั้น ๆ ของรายการ */
+export interface BrainAction {
+  tool: ToolName;
   title: string;
-  /** รายละเอียดเพิ่ม / เนื้อโน้ต */
   body: string | null;
-  /** ISO 8601 พร้อม offset +07:00 — จุดเวลา/เวลาเริ่ม (reminder/event/note) */
+  /** ISO 8601 (+07:00) — จุดเวลา/เวลาเริ่ม */
   datetime: string | null;
-  /** ISO 8601 — เวลาสิ้นสุด (สำหรับช่วง เช่น 1–2 Sep) */
+  /** ISO 8601 — เวลาสิ้นสุด (ช่วงวัน) */
   end_datetime: string | null;
-  /** ทั้งวัน (ไม่เจาะเวลา) */
   all_day: boolean;
-  /** กติกาการเกิดซ้ำ; null = ครั้งเดียว */
   recurrence: Recurrence | null;
-  /** จำนวนเงิน (เฉพาะ add_expense) */
+  /** เฉพาะ record_expense (บาท) */
   amount: number | null;
-  /** ประเภทของคำถาม (เฉพาะ query) ช่วยให้ Phase 3 ค้นได้ตรง */
+  /** เฉพาะ query */
   query_kind: QueryKind;
-  /** ประโยคที่จะพูดตอบกลับผู้ใช้ (ภาษาไทย) */
+  /** เฉพาะ create_note — คนที่เกี่ยวข้อง (เช่น ["ลูก"]) ช่วยการค้นความทรงจำ */
+  people: string[] | null;
+  /** เฉพาะ update_item/delete_item — id ของรายการเดิม (จากรายการอ้างอิงที่ให้มา) */
+  target_ref: string | null;
+  /** เฉพาะ update_item — ทำเครื่องหมายเสร็จ/ยังไม่เสร็จ */
+  done: boolean | null;
+}
+
+export interface BrainPlan {
+  /** ลำดับ action ที่จะทำ; ว่าง = ไม่มีคำสั่ง (คุยเล่น) */
+  actions: BrainAction[];
+  /** ประโยคภาษาไทยสั้นที่จะพูดตอบรวมทั้งประโยค (เช่น "ได้ครับ") */
   speak_back: string;
+  /** true เมื่อข้อมูลจำเป็นไม่ครบ/กำกวม — ต้องถามผู้ใช้ก่อน แทนการเดา */
+  needs_clarification: boolean;
+  /** คำถามที่จะถามผู้ใช้ (ภาษาไทยสั้น) เมื่อ needs_clarification */
+  clarify_question: string | null;
+}
+
+/** One thing the user could refer to next turn ("อันแรก", "อันเมื่อกี้"). */
+export interface Referent {
+  /** the item id — echoed back as target_ref */
+  ref: string;
+  /** short human label shown to the model, e.g. "ประชุมทีม — จ. 1 ก.ย. 10:00" */
+  label: string;
+}
+
+/** Short-lived conversation memory passed into the next planning call. */
+export interface BrainContext {
+  referents: Referent[];
+  lastUtterance?: string;
+  /** an earlier utterance the brain asked to clarify — the next input completes it. */
+  pending?: string;
 }

@@ -48,9 +48,14 @@ export async function scheduleForItem(item: Item): Promise<string[]> {
   const hour = item.all_day ? 8 : p.hour;
   const minute = item.all_day ? 0 : p.minute;
 
+  const bodyByType: Record<string, string> = {
+    reminder: 'ถึงเวลาแล้ว ⏰',
+    todo: 'อย่าลืมทำ ☑️',
+    event: 'มีรายการวันนี้ 📅',
+  };
   const content: Notifications.NotificationContentInput = {
     title: item.title,
-    body: item.type === 'reminder' ? 'ถึงเวลาแล้ว ⏰' : 'มีรายการวันนี้ 📅',
+    body: bodyByType[item.type] ?? 'แจ้งเตือน',
     sound: 'default',
   };
 

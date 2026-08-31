@@ -1,10 +1,10 @@
-// Quick CLI to exercise "the brain" without opening the app.
+// Quick CLI to exercise "the brain" (action planner) without opening the app.
 //
 //   node scripts/test-brain.mjs                 # runs the built-in samples
 //   node scripts/test-brain.mjs "จ่ายค่าน้ำวันที่ 5"   # runs your own line
 //
-// Reads EXPO_PUBLIC_GROQ_API_KEY from .env. This mirrors the prompt in
-// src/brain/prompt.ts — keep them in sync when you tune the system prompt.
+// Reads EXPO_PUBLIC_GROQ_API_KEY from .env. Mirrors src/brain/prompt.ts —
+// keep the SYSTEM prompt in sync when you tune it.
 
 import { readFileSync } from 'node:fs';
 
@@ -43,38 +43,49 @@ function nowContext(now = new Date()) {
 
 // Kept in sync with src/brain/prompt.ts (SYSTEM). Update both together.
 const SYSTEM = `คุณคือ "สมอง" ของแอปผู้ช่วยส่วนตัวสั่งงานด้วยเสียงภาษาไทย
-หน้าที่: อ่านสิ่งที่ผู้ใช้พูด แล้วแปลงเป็น JSON ตาม schema เป๊ะ ๆ ตัวเดียว ห้ามมีข้อความอื่นนอก JSON
+หน้าที่: อ่านสิ่งที่ผู้ใช้พูด แล้วแปลงเป็น "แผนการกระทำ" (action plan) เป็น JSON ตัวเดียว ห้ามมีข้อความอื่นนอก JSON
 
+สำคัญ: หนึ่งประโยคอาจมีได้หลายคำสั่ง ให้แตกเป็นหลาย action
 timezone อ้างอิงคือ Asia/Bangkok เสมอ ทุก datetime ต้องเป็น ISO 8601 พร้อม offset +07:00
-ให้คำนวณคำบอกเวลาสัมพัทธ์ ("พรุ่งนี้", "มะรืน", "เดือนนี้", "อาทิตย์หน้า") จาก "เวลาปัจจุบัน" ที่ให้มา
+คำนวณเวลาสัมพัทธ์ ("พรุ่งนี้", "ก่อน 1 วัน") จาก "เวลาปัจจุบัน" ที่ให้มา
 
-schema (ใส่ค่าที่เกี่ยวข้อง ที่เหลือใส่ null):
+รูปแบบผลลัพธ์:
 {
-  "intent": "create_reminder" | "create_event" | "create_note" | "query" | "add_expense" | "unknown",
-  "title": string,               // ป้ายสั้น เช่น "กินยา", "ตั้งปลุก"
-  "body": string | null,         // รายละเอียด/เนื้อโน้ต
-  "datetime": string | null,     // ISO+07:00 จุดเวลา/เวลาเริ่ม
-  "end_datetime": string | null, // ISO+07:00 เวลาสิ้นสุด (ช่วงวัน)
-  "all_day": boolean,            // true ถ้าไม่เจาะเวลา
-  "recurrence": null | { "freq":"daily"|"weekly"|"monthly"|"yearly", "byday": ["MO".."SU"] | null, "interval": number },
-  "amount": number | null,       // เฉพาะ add_expense (บาท)
-  "query_kind": "list_today" | "list_range" | "search" | null,
-  "speak_back": string           // ประโยคภาษาไทยสั้น กระชับ สุภาพ ยืนยันสิ่งที่บันทึก/ตอบคำถาม
+  "actions": [
+    {
+      "tool": "create_reminder" | "create_event" | "create_todo" | "create_note" | "record_expense" | "query",
+      "title": string, "body": string|null,
+      "datetime": string|null, "end_datetime": string|null, "all_day": boolean,
+      "recurrence": null | { "freq":"daily"|"weekly"|"monthly"|"yearly", "byday": ["MO".."SU"]|null, "interval": number },
+      "amount": number|null, "query_kind": "list_today"|"list_range"|"search"|null,
+      "people": ["ชื่อ"]|null
+    }
+  ],
+  "speak_back": string,
+  "needs_clarification": boolean,
+  "clarify_question": string|null
 }
-
 กติกา:
-- reminder = มีเวลาชัดและอยากถูกเตือน; event = เหตุการณ์/ช่วงวัน; note = บันทึกความทรงจำ/ไดอารี่
+- create_todo = สิ่งที่ต้องทำแต่ไม่ระบุเวลาเตือน; ถ้ามีเวลาเตือนให้เพิ่ม create_reminder อีก action
+- create_note = ไดอารี่/ความทรงจำ ใส่ people ถ้ามีคนเกี่ยวข้อง
+- query_kind="search" = ค้นความทรงจำย้อนหลัง (เช่น "ลูกเริ่มพูดเมื่อไหร่") ใส่คำถามใน title
+- query_kind="list_range" = ถามช่วง (เช่น "พรุ่งนี้มีอะไร") ต้องใส่ datetime=ต้นช่วง, end_datetime=ท้ายช่วง (ISO+07:00)
 - "ทุกวันยกเว้นเสาร์อาทิตย์" => recurrence.freq="weekly", byday=["MO","TU","WE","TH","FR"]
-- ถ้าไม่ระบุปี ใช้ปีปัจจุบัน; ถ้าเวลาที่พูดผ่านไปแล้ววันนี้และเป็น reminder ครั้งเดียว ให้ตีความเป็นวันถัดไปที่สมเหตุผล
-- speak_back พูดกับผู้ใช้ตรง ๆ เช่น "ตั้งเตือนกินยาพรุ่งนี้ 9 โมงเช้าให้แล้วนะครับ"
+- ถ้า create_reminder ไม่ระบุเวลาชัด (รวมแบบซ้ำ เช่น "ทุกวันที่ 1") ให้ตั้ง 09:00 อย่าใช้ 00:00
+- ถ้า create_reminder บอกเวลาแบบกว้าง ("เช้า","เย็น","บ่าย") ไม่มีเวลาชัด ให้ needs_clarification=true, clarify_question="ประมาณกี่โมงครับ", actions=[]
+- speak_back สั้นมาก เช่น "ได้ครับ"
 - ตอบ JSON เท่านั้น`;
 
 const SAMPLES = [
   'พรุ่งนี้อย่าลืมกินยาตอน 9 โมง',
   'ตั้งนาฬิกาปลุกให้หน่อยทุกวัน 8 โมง ยกเว้นวันเสาร์ อาทิตย์',
-  'วันที่ 1 ถึง 2 กันยา พ่อแม่ไปขายของ',
+  'วันที่ 1 ถึง 2 กันยา พ่อแม่ไปขายของ เตือนผมก่อนหนึ่งวันด้วย', // multi-action
+  'ต้องซื้ออาหารแมว',                                            // todo (no time)
+  'เย็นนี้เตือนซื้อไข่ด้วย',                                       // todo + reminder
   'วันนี้เป็นวันแรกที่ลูกพูดได้',
   'วันนี้มีอะไรต้องทำบ้าง',
+  'ลูกเริ่มพูดได้ตั้งแต่เมื่อไหร่นะ',   // memory recall → query_kind "search"
+  'เตือนกินยาพรุ่งนี้เช้า',            // vague time → should ask "กี่โมง"
   'ซื้อโจ๊กไป 60 บาท',
 ];
 
@@ -101,13 +112,20 @@ const inputs = process.argv.slice(2).length ? [process.argv.slice(2).join(' ')] 
 console.log(`🕐 ${nowContext()}\n`);
 for (const text of inputs) {
   try {
-    const r = await run(text);
+    const plan = await run(text);
     console.log(`🎙️  "${text}"`);
-    console.log(`   → ${r.intent} · ${r.title}`);
-    if (r.datetime) console.log(`     datetime: ${r.datetime}${r.end_datetime ? ` → ${r.end_datetime}` : ''}`);
-    if (r.recurrence) console.log(`     recurrence: ${JSON.stringify(r.recurrence)}`);
-    if (r.amount != null) console.log(`     amount: ${r.amount}`);
-    console.log(`     🔊 ${r.speak_back}\n`);
+    for (const a of plan.actions ?? []) {
+      const bits = [a.tool, a.title].filter(Boolean).join(' · ');
+      console.log(`   → ${bits}`);
+      if (a.datetime) console.log(`       ${a.datetime}${a.end_datetime ? ` → ${a.end_datetime}` : ''}`);
+      if (a.recurrence) console.log(`       recurrence: ${JSON.stringify(a.recurrence)}`);
+      if (a.amount != null) console.log(`       amount: ${a.amount}`);
+      if (a.query_kind) console.log(`       query_kind: ${a.query_kind}`);
+      if (a.people?.length) console.log(`       people: ${a.people.join(', ')}`);
+    }
+    if (plan.needs_clarification) console.log(`   ❓ ${plan.clarify_question}`);
+    else console.log(`   🔊 ${plan.speak_back}`);
+    console.log('');
   } catch (e) {
     console.error(`   ❌ ${e.message}\n`);
   }

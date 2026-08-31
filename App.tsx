@@ -18,12 +18,13 @@ import { getEngines } from './src/speech/engines';
 import { useVoiceInput } from './src/speech/useVoiceInput';
 import { speak } from './src/speech/tts';
 import type { SttEngineId, TranscriptResult } from './src/speech/types';
-import { parseIntent } from './src/brain/parseIntent';
-import { brainToItem } from './src/brain/toItem';
-import { describeBrain, intentLabel, formatDateTime, formatRecurrence } from './src/brain/format';
-import type { BrainResult } from './src/brain/types';
+import { planActions } from './src/brain/planActions';
+import { actionToItem } from './src/brain/toItem';
+import { searchMemory } from './src/brain/searchMemory';
+import { describeAction, toolLabel, formatDateTime, formatRecurrence } from './src/brain/format';
+import type { BrainPlan, BrainContext, Referent } from './src/brain/types';
 import { useStore } from './src/store/useStore';
-import { answerQuery } from './src/store/query';
+import { answerQuery, queryItems } from './src/store/query';
 import type { Item } from './src/store/types';
 import { initNotifications, ensureNotifyPermission } from './src/notify/setup';
 import { scheduleForItem, cancelNotifications } from './src/notify/scheduler';
@@ -48,34 +49,116 @@ export default function App() {
   const [last, setLast] = useState<TranscriptResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [thinking, setThinking] = useState(false);
-  const [brain, setBrain] = useState<BrainResult | null>(null);
+  const [plan, setPlan] = useState<BrainPlan | null>(null);
 
   const items = useStore((state) => state.items);
   const hasHydrated = useStore((state) => state.hasHydrated);
   const addItem = useStore((state) => state.addItem);
   const removeItem = useStore((state) => state.removeItem);
   const toggleDone = useStore((state) => state.toggleDone);
+  const updateItem = useStore((state) => state.updateItem);
+
+  // Short-lived conversation memory: what the user can refer to next turn
+  // ("อันแรก" / "อันเมื่อกี้") + a pending utterance awaiting clarification.
+  const contextRef = useRef<BrainContext>({ referents: [] });
 
   useEffect(() => {
     void initNotifications();
   }, []);
 
-  const saveIntent = useCallback(
-    async (result: BrainResult) => {
-      const item = brainToItem(result);
-      if (!item) return;
-      await ensureNotifyPermission();
-      const ids = await scheduleForItem(item);
-      addItem({ ...item, notificationIds: ids });
+  // Apply an update_item action; reschedule notifications if the timing changed.
+  const applyUpdate = useCallback(
+    async (target: Item, action: BrainPlan['actions'][number]) => {
+      const patch: Partial<Item> = {};
+      if (action.datetime) patch.start_at = action.datetime;
+      if (action.end_datetime) patch.end_at = action.end_datetime;
+      if (action.recurrence) patch.recurrence = action.recurrence;
+      if (action.done != null) patch.done = action.done;
+
+      const timingChanged = patch.start_at !== undefined || patch.recurrence !== undefined;
+      if (timingChanged) {
+        await cancelNotifications(target.notificationIds);
+        patch.notificationIds = await scheduleForItem({ ...target, ...patch });
+      }
+      updateItem(target.id, patch);
     },
-    [addItem],
+    [updateItem],
+  );
+
+  // Carry out every action in a plan, then speak one reply.
+  const executePlan = useCallback(
+    async (p: BrainPlan, rawText: string) => {
+      const CREATE_TOOLS = ['create_reminder', 'create_event', 'create_todo', 'create_note'];
+      const snapshot = () => useStore.getState().items;
+      const created: Item[] = [];
+
+      const needsPerm = p.actions.some(
+        (a) => CREATE_TOOLS.includes(a.tool) || a.tool === 'update_item',
+      );
+      if (needsPerm) await ensureNotifyPermission();
+
+      for (const action of p.actions) {
+        if (CREATE_TOOLS.includes(action.tool)) {
+          const item = actionToItem(action, rawText); // keep the verbatim sentence
+          if (!item) continue;
+          const ids = await scheduleForItem(item);
+          const saved = { ...item, notificationIds: ids };
+          addItem(saved);
+          created.push(saved);
+        } else if (action.tool === 'delete_item') {
+          const target = snapshot().find((i) => i.id === action.target_ref);
+          if (target) {
+            await cancelNotifications(target.notificationIds);
+            removeItem(target.id);
+          }
+        } else if (action.tool === 'update_item') {
+          const target = snapshot().find((i) => i.id === action.target_ref);
+          if (target) await applyUpdate(target, action);
+        }
+      }
+
+      // Query answer is data-driven → wins over the plan's canned reply.
+      const queryAction = p.actions.find((a) => a.tool === 'query');
+      let answer = p.speak_back;
+      if (queryAction) {
+        answer =
+          queryAction.query_kind === 'search'
+            ? await searchMemory(queryAction.title || rawText, snapshot())
+            : answerQuery(snapshot(), queryAction);
+      }
+      speak(answer);
+
+      // Expense handoff last — it backgrounds this app.
+      const expense = p.actions.find((a) => a.tool === 'record_expense' && a.amount != null);
+      if (expense) {
+        const date = bkkDateStr(expense.datetime ?? new Date());
+        const res = await sendExpenseToDailyBudget({
+          amount: expense.amount as number,
+          note: expense.title,
+          date,
+        });
+        if (!res.ok) speak('ยังเปิดแอปงบวันนี้ไม่ได้ครับ ติดตั้งแอปหรือยังครับ');
+      }
+
+      // Refresh what "อันแรก / อันเมื่อกี้" points at for the next turn.
+      let refItems: Item[];
+      if (queryAction && queryAction.query_kind !== 'search') {
+        refItems = queryItems(snapshot(), queryAction);
+      } else if (created.length) {
+        refItems = created;
+      } else {
+        refItems = [...snapshot()].sort((a, b) => b.created_at.localeCompare(a.created_at));
+      }
+      contextRef.current = { referents: toReferents(refItems), lastUtterance: rawText };
+    },
+    [addItem, removeItem, applyUpdate],
   );
 
   const handleResult = useCallback(
     (result: TranscriptResult) => {
       setError(null);
       setLast(result);
-      setBrain(null);
+      setPlan(null);
 
       if (!result.text) {
         speak('ไม่ได้ยินเสียงพูดเลยครับ');
@@ -87,31 +170,16 @@ export default function App() {
       }
 
       setThinking(true);
-      parseIntent(result.text)
+      planActions(result.text, new Date(), contextRef.current)
         .then(async (parsed) => {
-          setBrain(parsed);
-          if (
-            parsed.intent === 'create_reminder' ||
-            parsed.intent === 'create_event' ||
-            parsed.intent === 'create_note'
-          ) {
-            await saveIntent(parsed);
-            speak(parsed.speak_back);
-          } else if (parsed.intent === 'query') {
-            const answer = answerQuery(useStore.getState().items, parsed);
-            speak(answer);
-          } else if (parsed.intent === 'add_expense' && parsed.amount != null) {
-            speak(parsed.speak_back);
-            const date = bkkDateStr(parsed.datetime ?? new Date());
-            const response = await sendExpenseToDailyBudget({
-              amount: parsed.amount,
-              note: parsed.title,
-              date,
-            });
-            if (!response.ok) speak('ยังเปิดแอปงบวันนี้ไม่ได้ครับ ติดตั้งแอปหรือยังครับ');
-          } else {
-            speak(parsed.speak_back);
+          setPlan(parsed);
+          // Not confident enough — ask instead of guessing; next turn completes it.
+          if (parsed.needs_clarification && parsed.clarify_question) {
+            contextRef.current = { ...contextRef.current, pending: result.text };
+            speak(parsed.clarify_question);
+            return;
           }
+          await executePlan(parsed, result.text);
         })
         .catch((caught: unknown) => {
           const message = caught instanceof Error ? caught.message : String(caught);
@@ -120,7 +188,7 @@ export default function App() {
         })
         .finally(() => setThinking(false));
     },
-    [saveIntent],
+    [executePlan],
   );
 
   const handleDelete = useCallback(
@@ -256,7 +324,7 @@ export default function App() {
 
           <SectionHeader index="01" title="CONVERSATION STREAM" />
           <View style={styles.conversation}>
-            {!last && !partial && !thinking && !brain && (
+            {!last && !partial && !thinking && !plan && (
               <AssistantMessage text="สวัสดีครับ วันนี้ให้ผมช่วยจำหรือจัดการอะไรให้ดีครับ?" />
             )}
 
@@ -284,45 +352,66 @@ export default function App() {
               </View>
             )}
 
-            {brain && (
+            {plan && (
               <View style={styles.aiMessageRow}>
                 <AssistantAvatar active />
                 <View style={styles.aiResponseColumn}>
                   <View style={[styles.messageBubble, styles.aiBubble]}>
                     <View style={styles.messageTopline}>
-                      <Text style={styles.messageSender}>VORA / RESPONSE</Text>
+                      <Text style={styles.messageSender}>
+                        {plan.needs_clarification ? 'VORA / NEEDS INPUT' : 'VORA / RESPONSE'}
+                      </Text>
                       <Pressable
                         accessibilityLabel="พูดคำตอบซ้ำ"
                         accessibilityRole="button"
                         hitSlop={10}
-                        onPress={() => speak(brain.speak_back)}
+                        onPress={() =>
+                          speak(
+                            plan.needs_clarification && plan.clarify_question
+                              ? plan.clarify_question
+                              : plan.speak_back,
+                          )
+                        }
                       >
                         <Text style={styles.replay}>SPEAK ↗</Text>
                       </Pressable>
                     </View>
-                    <Text style={styles.aiResponseText}>{brain.speak_back}</Text>
+                    <Text
+                      style={[
+                        styles.aiResponseText,
+                        plan.needs_clarification && styles.clarifyText,
+                      ]}
+                    >
+                      {plan.needs_clarification && plan.clarify_question
+                        ? `❓ ${plan.clarify_question}`
+                        : plan.speak_back}
+                    </Text>
                   </View>
 
-                  <View style={styles.actionCard}>
-                    <View style={styles.actionHeader}>
-                      <Text style={styles.actionLabel}>ACTION INTERPRETED</Text>
-                      <View style={styles.intentBadge}>
-                        <Text style={styles.intentText}>{intentLabel(brain.intent)}</Text>
+                  {plan.actions.map((action, index) => (
+                    <View key={index} style={styles.actionCard}>
+                      <View style={styles.actionHeader}>
+                        <Text style={styles.actionLabel}>
+                          ACTION {String(index + 1).padStart(2, '0')}
+                        </Text>
+                        <View style={styles.intentBadge}>
+                          <Text style={styles.intentText}>{toolLabel(action.tool)}</Text>
+                        </View>
                       </View>
+                      <Text style={styles.actionTitle}>{action.title || '—'}</Text>
+                      {describeAction(action).map((row) => (
+                        <View key={row.label} style={styles.actionRow}>
+                          <Text style={styles.actionRowLabel}>{row.label.toUpperCase()}</Text>
+                          <Text style={styles.actionRowValue}>{row.value}</Text>
+                        </View>
+                      ))}
                     </View>
-                    <Text style={styles.actionTitle}>{brain.title}</Text>
-                    {describeBrain(brain).map((row) => (
-                      <View key={row.label} style={styles.actionRow}>
-                        <Text style={styles.actionRowLabel}>{row.label.toUpperCase()}</Text>
-                        <Text style={styles.actionRowValue}>{row.value}</Text>
-                      </View>
-                    ))}
-                  </View>
+                  ))}
                 </View>
               </View>
             )}
 
-            {!thinking && last && !brain && !isGroqConfigured() && (
+            {!thinking && last && !plan && !isGroqConfigured() && (
               <AssistantMessage text="รับเสียงแล้วครับ ขณะนี้กำลังทำงานในโหมดทดสอบเสียง" />
             )}
 
@@ -610,8 +699,19 @@ function MicGlyph({ active }: { active: boolean }) {
 const TYPE_META: Record<Item['type'], { icon: string; label: string }> = {
   reminder: { icon: '◴', label: 'REMINDER' },
   event: { icon: '◇', label: 'EVENT' },
+  todo: { icon: '☑', label: 'TODO' },
   note: { icon: '≡', label: 'NOTE' },
 };
+
+/** Build the referable-items list the brain uses to resolve "อันแรก" etc.
+ *  Includes the raw ISO start so the model can edit time while keeping the day. */
+function toReferents(items: Item[]): Referent[] {
+  return items.slice(0, 8).map((item) => {
+    const when = formatDateTime(item.start_at, item.all_day);
+    const iso = item.start_at ? ` {${item.start_at}}` : '';
+    return { ref: item.id, label: `${item.title}${when ? ` — ${when}` : ''}${iso}` };
+  });
+}
 
 function ItemRow({
   item,
@@ -894,6 +994,7 @@ const styles = StyleSheet.create({
   userSender: { color: colors.textFaint, fontSize: 8, fontWeight: '800', letterSpacing: 1 },
   replay: { color: colors.primary, fontSize: 8, fontWeight: '800', letterSpacing: 0.8 },
   aiResponseText: { color: colors.text, fontSize: font.md, lineHeight: 24 },
+  clarifyText: { color: colors.warning, fontWeight: '700' },
   userMessageText: { color: colors.text, fontSize: font.md, lineHeight: 24 },
   liveText: { color: colors.primaryBright, fontStyle: 'italic' },
   userNode: {
