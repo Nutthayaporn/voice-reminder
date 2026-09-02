@@ -1,6 +1,6 @@
 {
-  "name": "V.O.R.A. — Voice Operated Reminder Assistant",
-  "short_name": "V.O.R.A.",
+  "name": "VORA",
+  "short_name": "VORA",
   "description": "ผู้ช่วยส่วนตัวสั่งงานด้วยเสียงสำหรับเตือน จด และค้นความทรงจำ",
   "lang": "th",
   "start_url": "/",

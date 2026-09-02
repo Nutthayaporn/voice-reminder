@@ -14,11 +14,11 @@ export function getEngines(): EngineInfo[] {
       {
         id: 'web',
         label: 'Browser',
-        hint: 'Web Speech API · Chrome/Edge รองรับภาษาไทย',
+        hint: 'Web Speech API · Thai supported on Chrome and Edge',
         available: webReady,
         unavailableReason: webReady
           ? undefined
-          : 'เบราว์เซอร์นี้ไม่รองรับ Web Speech API (แนะนำ Chrome หรือ Edge)',
+          : 'This browser does not support Web Speech API. Use Chrome or Edge.',
       },
     ];
   }
@@ -30,20 +30,20 @@ export function getEngines(): EngineInfo[] {
     {
       id: 'cloud',
       label: 'Cloud',
-      hint: 'Groq Whisper · แม่นภาษาไทยสูง · ต้องต่อเน็ต',
+      hint: 'Groq Whisper · High Thai accuracy · Internet required',
       available: groqReady,
       unavailableReason: groqReady
         ? undefined
-        : 'ยังไม่ได้ตั้งค่า EXPO_PUBLIC_GROQ_API_KEY',
+        : 'EXPO_PUBLIC_GROQ_API_KEY is not configured',
     },
     {
       id: 'device',
       label: 'On-device',
-      hint: 'ในเครื่อง · เร็ว · ออฟไลน์ได้',
+      hint: 'On-device · Fast · Works offline',
       available: deviceReady,
       unavailableReason: deviceReady
         ? undefined
-        : 'ต้องรันเป็น dev build (ไม่รองรับใน Expo Go)',
+        : 'Requires a development build and is unavailable in Expo Go',
     },
   ];
 }

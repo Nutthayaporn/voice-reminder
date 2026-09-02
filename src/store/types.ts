@@ -9,6 +9,8 @@ export type ItemType = 'reminder' | 'event' | 'todo' | 'note';
 
 export interface Item {
   id: string;
+  /** null = personal item; UUID = shared household visible to every member. */
+  household_id?: string | null;
   type: ItemType;
   title: string;
   body: string | null;

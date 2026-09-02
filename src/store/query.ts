@@ -1,5 +1,5 @@
 // Answers a `query` intent by reading the local store and composing a spoken
-// Thai reply. Phase 2 handles the common cases (today / this week); richer
+// reply. Phase 2 handles the common cases (today / this week); richer
 // natural-language search can grow here later.
 
 import type { BrainAction } from '../brain/types';
@@ -25,10 +25,16 @@ function bkkWeekdayCode(d: Date): string {
 
 function timeLabel(iso: string | null, allDay: boolean): string {
   if (!iso || allDay) return '';
-  const t = new Intl.DateTimeFormat('th-TH', {
-    timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(new Date(iso));
-  return ` เวลา ${t} น.`;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(iso));
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    Number(parts.find((value) => value.type === type)?.value ?? 0);
+  const hour24 = part('hour');
+  const minute = part('minute');
+  const period = hour24 >= 12 ? 'PM' : 'AM';
+  const hour = hour24 % 12 || 12;
+  return minute === 0 ? ` at ${hour} ${period}` : ` at ${hour} ${minute} ${period}`;
 }
 
 /** Does this item occur on `day` (a Bangkok calendar date)? */
@@ -67,13 +73,13 @@ function occursOn(item: Item, day: Date): boolean {
   }
 }
 
-/** Short Thai date+time label, e.g. " · 1 ก.ย. เวลา 10:00 น." (for range lists). */
+/** Speech-friendly date+time label with no abbreviations. */
 function dayTimeLabel(iso: string | null, allDay: boolean): string {
   if (!iso) return '';
-  const date = new Intl.DateTimeFormat('th-TH', {
-    timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short',
+  const date = new Intl.DateTimeFormat('en-US', {
+    timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long',
   }).format(new Date(iso));
-  return allDay ? ` · ${date}` : ` · ${date}${timeLabel(iso, false)}`;
+  return allDay ? `, ${date}` : `, ${date}${timeLabel(iso, false)}`;
 }
 
 /** The ordered set of items relevant "today" — dated occurrences + standing
@@ -131,11 +137,11 @@ export function answerQuery(items: Item[], action: BrainAction, now: Date = new 
   const range = isRangeQuery(action);
   const all = queryItems(items, action, now);
   if (all.length === 0) {
-    return range ? 'ช่วงที่ถามยังไม่มีรายการครับ' : 'วันนี้ยังไม่มีรายการที่ต้องทำครับ';
+    return range ? 'There are no items in that time range.' : 'You have no items scheduled for today.';
   }
   // Range spans days → show the date on each; today → time only.
   const lines = all
     .map((i) => `${i.title}${range ? dayTimeLabel(i.start_at, i.all_day) : timeLabel(i.start_at, i.all_day)}`)
     .join(', ');
-  return `${range ? 'มี' : 'วันนี้มี'} ${all.length} รายการครับ: ${lines}`;
+  return `${range ? 'You have' : 'Today you have'} ${all.length} ${all.length === 1 ? 'item' : 'items'}: ${lines}`;
 }

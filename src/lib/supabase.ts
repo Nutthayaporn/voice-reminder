@@ -19,9 +19,9 @@ export const supabase: SupabaseClient | null = isSupabaseConfigured()
         ...(Platform.OS === 'web' ? {} : { storage: AsyncStorage }),
         autoRefreshToken: true,
         persistSession: true,
-        // This app verifies a six-digit email OTP in-app, so it does not need
-        // URL callback session detection on either native or web.
-        detectSessionInUrl: false,
+        // Web social auth returns by redirecting the current page. Native
+        // callbacks are handled explicitly by src/lib/auth.ts.
+        detectSessionInUrl: Platform.OS === 'web',
       },
     })
   : null;

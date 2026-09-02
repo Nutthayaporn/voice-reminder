@@ -42,10 +42,10 @@ private enum VoiceReminderCompletionStore {
 
 @available(iOS 26.0, *)
 private struct MarkReminderDoneIntent: LiveActivityIntent {
-  static var title: LocalizedStringResource = "ทำรายการเตือนแล้ว"
+  static var title: LocalizedStringResource = "Mark reminder as done"
   static var openAppWhenRun = false
 
-  @Parameter(title: "รหัสรายการเตือน")
+  @Parameter(title: "Reminder ID")
   var itemID: String
 
   init() {
@@ -128,7 +128,7 @@ public final class VoiceAlarmModule: Module {
       let validSnoozeMinutes = [5, 10, 30].contains(options.snoozeMinutes) ? options.snoozeMinutes : 10
       _ = options.maxAttempts // AlarmKit owns Repeat and doesn't expose a dynamic repeat cap.
       let repeatButton = AlarmButton(
-        text: LocalizedStringResource(stringLiteral: "เลื่อน \(validSnoozeMinutes) นาที"),
+        text: LocalizedStringResource(stringLiteral: "Snooze \(validSnoozeMinutes) min"),
         textColor: Color.cyan,
         systemImageName: "zzz"
       )
@@ -141,7 +141,7 @@ public final class VoiceAlarmModule: Module {
         )
       } else {
         let stopButton = AlarmButton(
-          text: LocalizedStringResource(stringLiteral: options.remindUntilDone ? "ทำแล้ว" : "หยุด"),
+          text: LocalizedStringResource(stringLiteral: options.remindUntilDone ? "Done" : "Stop"),
           textColor: Color.white,
           systemImageName: "stop.fill"
         )

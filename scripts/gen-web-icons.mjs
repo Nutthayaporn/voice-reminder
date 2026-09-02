@@ -1,38 +1,88 @@
-// Generate installable PWA icons which match V.O.R.A.'s dark HUD theme.
+// Generate the complete Expo + PWA icon set from the VORA master mark.
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const ASSETS = join(ROOT, 'assets');
 const PUBLIC = join(ROOT, 'public');
+const SOURCE = join(ASSETS, 'voice-reminder-logo.png');
+const BACKGROUND = '#02070C';
+
+mkdirSync(ASSETS, { recursive: true });
 mkdirSync(PUBLIC, { recursive: true });
 
-const svg = `
-<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <radialGradient id="bg" cx="50%" cy="42%" r="70%">
-      <stop offset="0" stop-color="#0A2A36"/>
-      <stop offset="1" stop-color="#02070C"/>
-    </radialGradient>
-    <filter id="glow"><feGaussianBlur stdDeviation="16" result="blur"/></filter>
-  </defs>
-  <rect width="1024" height="1024" rx="210" fill="url(#bg)"/>
-  <circle cx="512" cy="512" r="300" fill="none" stroke="#44F1FF" stroke-width="14" opacity="0.24" filter="url(#glow)"/>
-  <circle cx="512" cy="512" r="282" fill="#06121A" stroke="#44F1FF" stroke-width="12"/>
-  <circle cx="512" cy="512" r="230" fill="none" stroke="#1D697C" stroke-width="5" stroke-dasharray="18 15"/>
-  <path d="M332 332 L512 716 L692 332" fill="none" stroke="#C5FCFF" stroke-width="76" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="512" cy="760" r="20" fill="#57F2B1"/>
-</svg>`;
+async function renderIcon(path, size, logoScale = 1) {
+  const logoSize = Math.round(size * logoScale);
+  const logo = await sharp(SOURCE)
+    .resize(logoSize, logoSize, { fit: 'contain' })
+    .flatten({ background: BACKGROUND })
+    .png()
+    .toBuffer();
 
-const targets = [
-  { name: 'icon-192.png', size: 192 },
-  { name: 'icon-512.png', size: 512 },
-  { name: 'apple-touch-icon.png', size: 180 },
-];
-
-for (const target of targets) {
-  await sharp(Buffer.from(svg)).resize(target.size, target.size).png().toFile(join(PUBLIC, target.name));
+  await sharp({
+    create: { width: size, height: size, channels: 4, background: BACKGROUND },
+  })
+    .composite([{ input: logo, gravity: 'centre' }])
+    .png()
+    .toFile(path);
 }
 
-console.log(`gen-web-icons: wrote ${targets.map((target) => target.name).join(', ')}.`);
+async function renderCircularLogo(path, size, logoScale) {
+  const logoSize = Math.round(size * logoScale);
+  const circleMask = Buffer.from(
+    `<svg width="${logoSize}" height="${logoSize}"><circle cx="50%" cy="50%" r="49%" fill="white"/></svg>`,
+  );
+  const logo = await sharp(SOURCE)
+    .resize(logoSize, logoSize, { fit: 'contain' })
+    .ensureAlpha()
+    .composite([{ input: circleMask, blend: 'dest-in' }])
+    .png()
+    .toBuffer();
+
+  await sharp({
+    create: { width: size, height: size, channels: 4, background: '#00000000' },
+  })
+    .composite([{ input: logo, gravity: 'centre' }])
+    .png()
+    .toFile(path);
+}
+
+async function renderMonochrome(path, size, logoScale) {
+  const logoSize = Math.round(size * logoScale);
+  const alpha = await sharp(SOURCE)
+    .resize(logoSize, logoSize, { fit: 'contain' })
+    .greyscale()
+    .threshold(72)
+    .toBuffer();
+  const whiteMark = await sharp({
+    create: { width: logoSize, height: logoSize, channels: 3, background: '#FFFFFF' },
+  })
+    .joinChannel(alpha)
+    .png()
+    .toBuffer();
+
+  await sharp({
+    create: { width: size, height: size, channels: 4, background: '#00000000' },
+  })
+    .composite([{ input: whiteMark, gravity: 'centre' }])
+    .png()
+    .toFile(path);
+}
+
+await Promise.all([
+  renderIcon(join(ASSETS, 'icon.png'), 1024),
+  renderCircularLogo(join(ASSETS, 'splash-icon.png'), 1024, 0.72),
+  renderCircularLogo(join(ASSETS, 'android-icon-foreground.png'), 512, 0.76),
+  sharp({
+    create: { width: 512, height: 512, channels: 4, background: BACKGROUND },
+  }).png().toFile(join(ASSETS, 'android-icon-background.png')),
+  renderMonochrome(join(ASSETS, 'android-icon-monochrome.png'), 432, 0.76),
+  renderIcon(join(ASSETS, 'favicon.png'), 48, 0.92),
+  renderIcon(join(PUBLIC, 'icon-192.png'), 192, 0.92),
+  renderIcon(join(PUBLIC, 'icon-512.png'), 512, 0.92),
+  renderIcon(join(PUBLIC, 'apple-touch-icon.png'), 180, 0.92),
+]);
+
+console.log('gen-web-icons: wrote Expo, Android adaptive, favicon, and PWA icon assets.');

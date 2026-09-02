@@ -49,8 +49,8 @@ class AlarmRingingService : Service() {
 
   private fun createChannel() {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-    val channel = NotificationChannel(CHANNEL_ID, "นาฬิกาปลุก", NotificationManager.IMPORTANCE_HIGH).apply {
-      description = "เสียงปลุกที่ดังต่อเนื่องจนกว่าจะหยุดหรือเลื่อนปลุก"
+    val channel = NotificationChannel(CHANNEL_ID, "Alarms", NotificationManager.IMPORTANCE_HIGH).apply {
+      description = "Alarm sound that continues until stopped or snoozed"
       setSound(null, null)
       enableVibration(false)
       lockscreenVisibility = Notification.VISIBILITY_PUBLIC
@@ -71,7 +71,7 @@ class AlarmRingingService : Service() {
     val notification = builder
       .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
       .setContentTitle(payload.title)
-      .setContentText("รอบ ${payload.snoozeCount + 1}/${payload.maxAttempts}")
+      .setContentText("Attempt ${payload.snoozeCount + 1}/${payload.maxAttempts}")
       .setCategory(Notification.CATEGORY_ALARM)
       .setVisibility(Notification.VISIBILITY_PUBLIC)
       .setOngoing(true)
@@ -80,12 +80,12 @@ class AlarmRingingService : Service() {
       .setContentIntent(fullScreen)
     if (payload.snoozeCount + 1 < payload.maxAttempts) {
       notification.addAction(
-        Notification.Action.Builder(0, "เลื่อน ${payload.snoozeMinutes} นาที", snooze).build()
+        Notification.Action.Builder(0, "Snooze ${payload.snoozeMinutes} min", snooze).build()
       )
     }
     notification.addAction(
       Notification.Action.Builder(
-        0, if (payload.remindUntilDone) "ทำแล้ว" else "หยุด", primary
+        0, if (payload.remindUntilDone) "Done" else "Stop", primary
       ).build()
     )
     return notification.build()

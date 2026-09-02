@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Voice Reminder",
+    "name": "VORA",
     "slug": "voice-reminder",
     "scheme": "voicereminder",
     "version": "1.0.0",
@@ -26,7 +26,7 @@
     "android": {
       "package": "com.spyrocash.voicereminder",
       "adaptiveIcon": {
-        "backgroundColor": "#0B1120",
+        "backgroundColor": "#02070C",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -71,7 +71,8 @@
         {
           "color": "#38BDF8"
         }
-      ]
+      ],
+      "expo-web-browser"
     ],
     "extra": {
       "eas": {

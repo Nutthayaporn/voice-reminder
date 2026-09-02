@@ -12,6 +12,8 @@ import type {
   BrainAction,
   BrainContext,
   BrainPlan,
+  BudgetKind,
+  DeleteScope,
   QueryKind,
   Recurrence,
   SnoozeMinutes,
@@ -27,8 +29,12 @@ const VALID_TOOLS: ToolName[] = [
   'create_note',
   'record_expense',
   'query',
+  'query_budget',
+  'update_expense',
+  'delete_expense',
   'update_item',
   'delete_item',
+  'delete_items',
 ];
 
 export async function planActions(
@@ -37,7 +43,7 @@ export async function planActions(
   context?: BrainContext,
 ): Promise<BrainPlan> {
   if (!config.groqApiKey) {
-    throw new Error('ยังไม่ได้ตั้งค่า Groq API key (EXPO_PUBLIC_GROQ_API_KEY)');
+    throw new Error('Groq API key is not configured (EXPO_PUBLIC_GROQ_API_KEY).');
   }
 
   const res = await fetch(ENDPOINT, {
@@ -56,7 +62,7 @@ export async function planActions(
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`Groq LLM ล้มเหลว (${res.status}) ${detail}`.trim());
+    throw new Error(`Groq LLM failed (${res.status}) ${detail}`.trim());
   }
 
   const data = (await res.json()) as {
@@ -72,7 +78,7 @@ function normalise(raw: string): BrainPlan {
   } catch {
     return {
       actions: [],
-      speak_back: 'ขอโทษครับ ผมยังไม่เข้าใจ ลองพูดใหม่อีกครั้งได้ไหมครับ',
+      speak_back: 'Sorry, I did not understand that. Please try again.',
       needs_clarification: false,
       clarify_question: null,
     };
@@ -85,7 +91,7 @@ function normalise(raw: string): BrainPlan {
 
   const needsClarify = obj.needs_clarification === true;
   const clarify = strOrNull(obj.clarify_question);
-  const speak = str(obj.speak_back) || (actions.length ? 'รับทราบครับ' : 'ครับ ว่ามาได้เลย');
+  const speak = str(obj.speak_back) || (actions.length ? 'Done.' : 'How can I help?');
   return {
     actions,
     speak_back: speak,
@@ -113,8 +119,11 @@ function coerceAction(v: unknown): BrainAction | null {
     max_attempts: maxAttempts(a.max_attempts),
     amount: typeof a.amount === 'number' ? a.amount : null,
     query_kind: queryKind(a.query_kind),
+    budget_kind: budgetKind(a.budget_kind),
+    expense_ref: a.expense_ref === 'last' ? 'last' : null,
     people: stringArray(a.people),
     target_ref: strOrNull(a.target_ref),
+    delete_scope: deleteScope(a.delete_scope),
     done: typeof a.done === 'boolean' ? a.done : null,
   };
 }
@@ -135,6 +144,12 @@ function strOrNull(v: unknown): string | null {
 }
 function queryKind(v: unknown): QueryKind {
   return v === 'list_today' || v === 'list_range' || v === 'search' ? v : null;
+}
+function budgetKind(v: unknown): BudgetKind {
+  return v === 'today' || v === 'remaining' || v === 'status' || v === 'summary' ? v : null;
+}
+function deleteScope(v: unknown): DeleteScope {
+  return v === 'past' || v === 'done' || v === 'all' ? v : null;
 }
 function alertMode(v: unknown): AlertMode | null {
   return v === 'notification' || v === 'alarm' ? v : null;

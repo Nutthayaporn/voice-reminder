@@ -104,7 +104,7 @@ export function createWebStt(
     if (event.error === 'aborted') return;
     failed = true;
     callbacks.onError(
-      event.message || `Web Speech API ทำงานไม่สำเร็จ (${event.error ?? 'unknown'})`,
+      event.message || `Web Speech API failed (${event.error ?? 'unknown'}).`,
     );
   };
 

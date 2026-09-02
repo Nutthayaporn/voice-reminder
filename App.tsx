@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Animated,
   AppState,
   Easing,
+  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,10 +12,11 @@ import {
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { colors, font, radius, spacing } from './src/theme';
-import { isGroqConfigured } from './src/config';
+import { config, isGroqConfigured, isBudgetApiConfigured } from './src/config';
 import { getEngines } from './src/speech/engines';
 import { useVoiceInput } from './src/speech/useVoiceInput';
 import { speak } from './src/speech/tts';
@@ -31,8 +33,35 @@ import { initNotifications, ensureNotifyPermission } from './src/notify/setup';
 import { scheduleForItem, cancelNotifications } from './src/notify/scheduler';
 import { consumeCompletedNativeAlarmItemIds } from './src/notify/nativeAlarm';
 import { sendExpenseToDailyBudget } from './src/integrations/dailyBudget';
+import {
+  fetchBudgetSummary,
+  listExpenses,
+  addExpense,
+  updateExpense,
+  deleteExpense,
+  formatBudgetAnswer,
+  isBudgetReady,
+  type BudgetKind,
+  type BudgetTransaction,
+} from './src/integrations/budgetApi';
+import {
+  connect as connectBudget,
+  disconnect as disconnectBudget,
+  isConnected as isBudgetConnected,
+} from './src/integrations/budgetOAuth';
 import { bkkDateStr } from './src/lib/date';
 import { CloudSyncPanel } from './src/components/CloudSyncPanel';
+import { HouseholdPanel } from './src/components/HouseholdPanel';
+import { EditItemModal, type ItemEditPatch } from './src/components/EditItemModal';
+import { usePreferences } from './src/store/usePreferences';
+import { planLocalDelete } from './src/brain/localDelete';
+import {
+  deleteScopeLabel,
+  isDeleteCancellation,
+  isDeleteConfirmation,
+  itemsForDeleteScope,
+  resolveDeleteTarget,
+} from './src/store/delete';
 
 const HUD_HORIZONTAL_LINES = [86, 172, 258, 344, 430, 516, 602, 688] as const;
 const HUD_VERTICAL_LINES = [44, 132, 220, 308] as const;
@@ -44,17 +73,39 @@ const HUD_PARTICLES = [
 ] as const;
 const CORE_TICKS = Array.from({ length: 24 }, (_, index) => index);
 const WAVEFORM_HEIGHTS = [4, 9, 14, 7, 12, 5, 10] as const;
+type AppTab = 'talk' | 'items' | 'settings';
+interface PendingBulkDelete {
+  itemIds: string[];
+  description: string;
+}
 
 export default function App() {
   const engines = useMemo(() => getEngines(), []);
-  const firstAvailable = engines.find((candidate) => candidate.available)?.id ?? engines[0]?.id ?? 'cloud';
+  const preferredEngine = usePreferences((state) => state.preferredEngine);
+  const setPreferredEngine = usePreferences((state) => state.setPreferredEngine);
+  const defaultAlertMode = usePreferences((state) => state.defaultAlertMode);
+  const setDefaultAlertMode = usePreferences((state) => state.setDefaultAlertMode);
+  const activeHouseholdId = usePreferences((state) => state.activeHouseholdId);
+  const firstAvailable =
+    engines.find((candidate) => candidate.id === preferredEngine && candidate.available)?.id ??
+    engines.find((candidate) => candidate.available)?.id ??
+    engines[0]?.id ??
+    'cloud';
   const [engine, setEngine] = useState<SttEngineId>(firstAvailable);
+  const [activeTab, setActiveTab] = useState<AppTab>('talk');
   const [last, setLast] = useState<TranscriptResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [thinking, setThinking] = useState(false);
   const [plan, setPlan] = useState<BrainPlan | null>(null);
+  const [budgetConnected, setBudgetConnected] = useState(false);
+  const [budgetBusy, setBudgetBusy] = useState(false);
+  const [editingItem, setEditingItem] = useState<Item | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
+  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingBulkDeleteRef = useRef<PendingBulkDelete | null>(null);
 
   const items = useStore((state) => state.items);
+  const userId = useStore((state) => state.userId);
   const hasHydrated = useStore((state) => state.hasHydrated);
   const addItem = useStore((state) => state.addItem);
   const removeItem = useStore((state) => state.removeItem);
@@ -64,6 +115,24 @@ export default function App() {
   // Short-lived conversation memory: what the user can refer to next turn
   // ("อันแรก" / "อันเมื่อกี้") + a pending utterance awaiting clarification.
   const contextRef = useRef<BrainContext>({ referents: [] });
+  // The id of the last expense we logged to daily-budget this session, so
+  // "แก้เมื่อกี้เป็น 60" / "ลบอันเมื่อกี้" can target it (expense_ref="last").
+  const lastExpenseIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!preferredEngine) return;
+    const preferred = engines.find(
+      (candidate) => candidate.id === preferredEngine && candidate.available,
+    );
+    if (preferred) setEngine(preferred.id);
+  }, [engines, preferredEngine]);
+
+  useEffect(
+    () => () => {
+      if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+    },
+    [],
+  );
 
   const syncNativeCompletions = useCallback(async () => {
     const completedIds = await consumeCompletedNativeAlarmItemIds();
@@ -88,6 +157,38 @@ export default function App() {
   useEffect(() => {
     if (hasHydrated) void bootstrapSync();
   }, [bootstrapSync, hasHydrated]);
+
+  // Daily Budget account link (OAuth). Reflects whether this device holds a
+  // valid grant; the connect flow hands off to the daily-budget app and back.
+  const refreshBudgetConnection = useCallback(async () => {
+    setBudgetConnected(await isBudgetConnected());
+  }, []);
+
+  useEffect(() => {
+    void refreshBudgetConnection();
+  }, [refreshBudgetConnection]);
+
+  const handleConnectBudget = useCallback(async () => {
+    setBudgetBusy(true);
+    const res = await connectBudget();
+    setBudgetBusy(false);
+    await refreshBudgetConnection();
+    if (res.ok) {
+      speak('Daily Budget connected.');
+    } else if (res.reason === 'provider_missing') {
+      setError('Daily Budget app not found. Please install it to connect.');
+    } else if (res.reason && res.reason !== 'access_denied' && res.reason !== 'timeout') {
+      setError(`Could not connect Daily Budget: ${res.reason}`);
+    }
+  }, [refreshBudgetConnection]);
+
+  const handleDisconnectBudget = useCallback(async () => {
+    setBudgetBusy(true);
+    await disconnectBudget();
+    setBudgetBusy(false);
+    await refreshBudgetConnection();
+    speak('Daily Budget disconnected.');
+  }, [refreshBudgetConnection]);
 
   // Apply an update_item action; reschedule notifications if the timing changed.
   const applyUpdate = useCallback(
@@ -133,6 +234,101 @@ export default function App() {
       const CREATE_TOOLS = ['create_reminder', 'create_event', 'create_todo', 'create_note'];
       const snapshot = () => useStore.getState().items;
       const created: Item[] = [];
+      let requestedSingleDeletes = 0;
+      let completedSingleDeletes = 0;
+
+      // ── daily-budget REST helpers (see src/integrations/budgetApi.ts) ──────
+      const money = (n: number) => Math.round(n).toLocaleString('en-US');
+
+      const answerBudgetQuery = async (kind: BudgetKind | null): Promise<string> => {
+        if (!(await isBudgetReady())) {
+          return 'Please connect your Daily Budget account in settings first.';
+        }
+        try {
+          const summary = await fetchBudgetSummary();
+          return formatBudgetAnswer(summary, kind ?? 'summary');
+        } catch {
+          return 'I could not reach Daily Budget. Please check the connection or that cloud sync is on.';
+        }
+      };
+
+      const recordExpenseViaApi = async (
+        action: BrainPlan['actions'][number],
+      ): Promise<string> => {
+        try {
+          const tx = await addExpense({
+            amount: action.amount as number,
+            note: action.title || undefined,
+            date: bkkDateStr(action.datetime ?? new Date()),
+          });
+          lastExpenseIdRef.current = tx.id;
+          return `Logged ${money(tx.amount)} baht${tx.note ? ` for ${tx.note}` : ''}.`;
+        } catch {
+          return 'I could not save that expense to Daily Budget.';
+        }
+      };
+
+      // Resolve which logged expense an edit/delete refers to: the one we just
+      // added ("เมื่อกี้"), a note match, an amount match, else the most recent.
+      const findExpenseTarget = async (
+        action: BrainPlan['actions'][number],
+      ): Promise<BudgetTransaction | null> => {
+        let recent: BudgetTransaction[];
+        try {
+          recent = await listExpenses({ limit: 20 });
+        } catch {
+          return null;
+        }
+        const expenses = recent.filter((t) => t.type === 'expense');
+        if (action.expense_ref === 'last') {
+          return expenses.find((t) => t.id === lastExpenseIdRef.current) ?? expenses[0] ?? null;
+        }
+        const title = (action.title || '').trim().toLowerCase();
+        if (title) {
+          const byNote = expenses.find((t) => (t.note ?? '').toLowerCase().includes(title));
+          if (byNote) return byNote;
+        }
+        if (action.tool === 'delete_expense' && action.amount != null) {
+          const byAmount = expenses.find((t) => t.amount === action.amount);
+          if (byAmount) return byAmount;
+        }
+        return expenses[0] ?? null;
+      };
+
+      const editExpenseViaApi = async (
+        action: BrainPlan['actions'][number],
+      ): Promise<string> => {
+        if (!(await isBudgetReady())) {
+          return 'Please connect your Daily Budget account in settings first.';
+        }
+        const target = await findExpenseTarget(action);
+        if (!target) {
+          return action.tool === 'delete_expense'
+            ? 'I could not find that expense to delete.'
+            : 'I could not find that expense to edit.';
+        }
+        try {
+          if (action.tool === 'delete_expense') {
+            await deleteExpense(target.id);
+            if (lastExpenseIdRef.current === target.id) lastExpenseIdRef.current = null;
+            return `Deleted the ${money(target.amount)} baht expense${
+              target.note ? ` for ${target.note}` : ''
+            }.`;
+          }
+          const tx = await updateExpense({
+            id: target.id,
+            amount: action.amount ?? undefined,
+            note: action.title || undefined,
+            date: action.datetime ? bkkDateStr(action.datetime) : undefined,
+          });
+          lastExpenseIdRef.current = tx.id;
+          return `Updated to ${money(tx.amount)} baht.`;
+        } catch {
+          return action.tool === 'delete_expense'
+            ? 'I could not delete that expense.'
+            : 'I could not update that expense.';
+        }
+      };
 
       const needsPerm = p.actions.some(
         (a) => CREATE_TOOLS.includes(a.tool) || a.tool === 'update_item',
@@ -141,17 +337,24 @@ export default function App() {
 
       for (const action of p.actions) {
         if (CREATE_TOOLS.includes(action.tool)) {
-          const item = actionToItem(action, rawText); // keep the verbatim sentence
+          const item = actionToItem(
+            action,
+            rawText,
+            defaultAlertMode,
+            userId ? activeHouseholdId : null,
+          ); // keep the verbatim sentence
           if (!item) continue;
           const ids = await scheduleForItem(item);
           const saved = { ...item, notificationIds: ids };
           addItem(saved);
           created.push(saved);
         } else if (action.tool === 'delete_item') {
+          requestedSingleDeletes += 1;
           const target = snapshot().find((i) => i.id === action.target_ref);
           if (target) {
             await cancelNotifications(target.notificationIds);
             removeItem(target.id);
+            completedSingleDeletes += 1;
           }
         } else if (action.tool === 'update_item') {
           const target = snapshot().find((i) => i.id === action.target_ref);
@@ -162,24 +365,56 @@ export default function App() {
       // Query answer is data-driven → wins over the plan's canned reply.
       const queryAction = p.actions.find((a) => a.tool === 'query');
       let answer = p.speak_back;
+      if (requestedSingleDeletes > 0 && completedSingleDeletes === 0) {
+        answer = 'I could not find that item. Try saying its name or list your items first.';
+      } else if (completedSingleDeletes > 0) {
+        answer = `Deleted ${completedSingleDeletes} ${completedSingleDeletes === 1 ? 'item' : 'items'}.`;
+      }
       if (queryAction) {
         answer =
           queryAction.query_kind === 'search'
             ? await searchMemory(queryAction.title || rawText, snapshot())
             : answerQuery(snapshot(), queryAction);
       }
-      speak(answer);
 
-      // Expense handoff last — it backgrounds this app.
+      // ── daily-budget actions (REST bridge) ────────────────────────────────
+      // Budget answers and expense confirmations are data-driven, so they
+      // override the plan's canned speak_back. A deep-link handoff (record
+      // only, when the API isn't configured) is deferred until after we speak,
+      // because it backgrounds this app.
+      let deferredDeepLinkExpense: BrainPlan['actions'][number] | null = null;
+
+      const budgetQuery = p.actions.find((a) => a.tool === 'query_budget');
+      if (budgetQuery) {
+        answer = await answerBudgetQuery(budgetQuery.budget_kind);
+      }
+
       const expense = p.actions.find((a) => a.tool === 'record_expense' && a.amount != null);
       if (expense) {
-        const date = bkkDateStr(expense.datetime ?? new Date());
+        if (await isBudgetReady()) {
+          answer = await recordExpenseViaApi(expense);
+        } else {
+          deferredDeepLinkExpense = expense; // fall back to the deep link below
+        }
+      }
+
+      const editExpense = p.actions.find(
+        (a) => a.tool === 'update_expense' || a.tool === 'delete_expense',
+      );
+      if (editExpense) {
+        answer = await editExpenseViaApi(editExpense);
+      }
+
+      speak(answer);
+
+      if (deferredDeepLinkExpense) {
+        const date = bkkDateStr(deferredDeepLinkExpense.datetime ?? new Date());
         const res = await sendExpenseToDailyBudget({
-          amount: expense.amount as number,
-          note: expense.title,
+          amount: deferredDeepLinkExpense.amount as number,
+          note: deferredDeepLinkExpense.title,
           date,
         });
-        if (!res.ok) speak('ยังเปิดแอปงบวันนี้ไม่ได้ครับ ติดตั้งแอปหรือยังครับ');
+        if (!res.ok) speak('I could not open Daily Budget. Please check that it is installed.');
       }
 
       // Refresh what "อันแรก / อันเมื่อกี้" points at for the next turn.
@@ -193,7 +428,31 @@ export default function App() {
       }
       contextRef.current = { referents: toReferents(refItems), lastUtterance: rawText };
     },
-    [addItem, removeItem, applyUpdate],
+    [activeHouseholdId, addItem, applyUpdate, defaultAlertMode, removeItem, userId],
+  );
+
+  const executeConfirmedBulkDelete = useCallback(
+    async (pending: PendingBulkDelete) => {
+      const ids = new Set(pending.itemIds);
+      const targets = useStore.getState().items.filter((item) => ids.has(item.id));
+      await Promise.all(targets.map((item) => cancelNotifications(item.notificationIds)));
+      for (const item of targets) removeItem(item.id);
+      const answer = targets.length
+        ? `Deleted ${targets.length} ${targets.length === 1 ? 'item' : 'items'}.`
+        : 'There are no matching items left to delete.';
+      setPlan({
+        actions: [],
+        speak_back: answer,
+        needs_clarification: false,
+        clarify_question: null,
+      });
+      contextRef.current = {
+        referents: toReferents(useStore.getState().items),
+        lastUtterance: 'confirm delete',
+      };
+      speak(answer);
+    },
+    [removeItem],
   );
 
   const handleResult = useCallback(
@@ -203,42 +462,155 @@ export default function App() {
       setPlan(null);
 
       if (!result.text) {
-        speak('ไม่ได้ยินเสียงพูดเลยครับ');
+        speak('I did not hear anything. Please try again.');
         return;
       }
-      if (!isGroqConfigured()) {
-        speak(`คุณพูดว่า ${result.text}`);
+
+      const pendingBulk = pendingBulkDeleteRef.current;
+      if (pendingBulk) {
+        if (isDeleteConfirmation(result.text)) {
+          pendingBulkDeleteRef.current = null;
+          setThinking(true);
+          void executeConfirmedBulkDelete(pendingBulk)
+            .catch((caught: unknown) => {
+              const message = caught instanceof Error ? caught.message : String(caught);
+              setError(message);
+              speak('Sorry, I could not delete those items.');
+            })
+            .finally(() => setThinking(false));
+          return;
+        }
+        if (isDeleteCancellation(result.text)) {
+          pendingBulkDeleteRef.current = null;
+          const answer = 'Delete cancelled.';
+          setPlan({ actions: [], speak_back: answer, needs_clarification: false, clarify_question: null });
+          speak(answer);
+          return;
+        }
+        const question = `Nothing was deleted. To delete ${pendingBulk.description}, say “confirm”.`;
+        setPlan({ actions: [], speak_back: question, needs_clarification: true, clarify_question: question });
+        speak(question);
+        return;
+      }
+
+      const currentItems = useStore.getState().items;
+      const localDelete = planLocalDelete(result.text, currentItems, contextRef.current.referents);
+      if (!localDelete && !isGroqConfigured()) {
+        speak(`You said: ${result.text}`);
         return;
       }
 
       setThinking(true);
-      planActions(result.text, new Date(), contextRef.current)
+      const inventory = toReferents(currentItems, 200);
+      const planning = localDelete
+        ? Promise.resolve(localDelete)
+        : planActions(result.text, new Date(), { ...contextRef.current, inventory });
+      planning
         .then(async (parsed) => {
-          setPlan(parsed);
+          const currentItems = useStore.getState().items;
+          const resolvedPlan: BrainPlan = {
+            ...parsed,
+            actions: parsed.actions.map((action) => {
+              if (action.tool !== 'delete_item') return action;
+              const refExists = currentItems.some((item) => item.id === action.target_ref);
+              if (refExists) return action;
+              const fallback = resolveDeleteTarget(action.title, currentItems);
+              return fallback ? { ...action, target_ref: fallback.id } : action;
+            }),
+          };
+          setPlan(resolvedPlan);
           // Not confident enough — ask instead of guessing; next turn completes it.
-          if (parsed.needs_clarification && parsed.clarify_question) {
+          if (resolvedPlan.needs_clarification && resolvedPlan.clarify_question) {
             contextRef.current = { ...contextRef.current, pending: result.text };
-            speak(parsed.clarify_question);
+            speak(resolvedPlan.clarify_question);
             return;
           }
-          await executePlan(parsed, result.text);
+
+          const bulkAction = resolvedPlan.actions.find((action) => action.tool === 'delete_items');
+          const enumeratedDeletes = resolvedPlan.actions.filter(
+            (action) => action.tool === 'delete_item' && !!action.target_ref,
+          );
+          const candidates = bulkAction
+            ? itemsForDeleteScope(useStore.getState().items, bulkAction.delete_scope)
+            : enumeratedDeletes.length > 1
+              ? useStore
+                  .getState()
+                  .items.filter((item) =>
+                    enumeratedDeletes.some((action) => action.target_ref === item.id),
+                  )
+              : [];
+          if (bulkAction || enumeratedDeletes.length > 1) {
+            if (!candidates.length) {
+              const answer = bulkAction?.delete_scope
+                ? `I could not find ${deleteScopeLabel(bulkAction.delete_scope)}.`
+                : 'I could not find the items you wanted to delete.';
+              setPlan({ ...resolvedPlan, speak_back: answer, needs_clarification: false, clarify_question: null });
+              speak(answer);
+              return;
+            }
+            const description = bulkAction?.delete_scope
+              ? deleteScopeLabel(bulkAction.delete_scope)
+              : `${candidates.length} selected items`;
+            const question = `I found ${candidates.length} ${candidates.length === 1 ? 'item' : 'items'}. To delete ${description}, say “confirm”.`;
+            pendingBulkDeleteRef.current = {
+              itemIds: candidates.map((item) => item.id),
+              description,
+            };
+            setPlan({ ...resolvedPlan, speak_back: question, needs_clarification: true, clarify_question: question });
+            speak(question);
+            return;
+          }
+          await executePlan(resolvedPlan, result.text);
         })
         .catch((caught: unknown) => {
           const message = caught instanceof Error ? caught.message : String(caught);
           setError(message);
-          speak('ขอโทษครับ ประมวลผลไม่สำเร็จ');
+          speak('Sorry, I could not process that request.');
         })
         .finally(() => setThinking(false));
     },
-    [executePlan],
+    [executeConfirmedBulkDelete, executePlan],
   );
 
-  const handleDelete = useCallback(
+  const commitDelete = useCallback(
     (item: Item) => {
       void cancelNotifications(item.notificationIds);
       removeItem(item.id);
     },
     [removeItem],
+  );
+
+  const handleDelete = useCallback(
+    (item: Item) => {
+      if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+      if (pendingDelete && pendingDelete.id !== item.id) commitDelete(pendingDelete);
+      setPendingDelete(item);
+      deleteTimerRef.current = setTimeout(() => {
+        commitDelete(item);
+        setPendingDelete((current) => (current?.id === item.id ? null : current));
+        deleteTimerRef.current = null;
+      }, 6000);
+    },
+    [commitDelete, pendingDelete],
+  );
+
+  const handleUndoDelete = useCallback(() => {
+    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+    deleteTimerRef.current = null;
+    setPendingDelete(null);
+  }, []);
+
+  const handleSaveEdit = useCallback(
+    async (patch: ItemEditPatch) => {
+      const item = editingItem;
+      if (!item) return;
+      await cancelNotifications(item.notificationIds);
+      const next = { ...item, ...patch };
+      const notificationIds = await scheduleForItem(next);
+      updateItem(item.id, { ...patch, notificationIds });
+      setEditingItem(null);
+    },
+    [editingItem, updateItem],
   );
 
   const handleAlertModeChange = useCallback(
@@ -298,18 +670,19 @@ export default function App() {
   const busy = status === 'transcribing';
   const activeEngine = engines.find((candidate) => candidate.id === engine);
   const coreStatus = busy
-    ? 'กำลังถอดเสียง'
+    ? 'TRANSCRIBING'
     : thinking
-      ? 'กำลังวิเคราะห์'
+      ? 'PROCESSING'
       : listening
-        ? 'กำลังฟังคุณ'
-        : 'พร้อมรับคำสั่ง';
+        ? 'LISTENING'
+        : 'READY FOR COMMAND';
+  const visibleItems = items.filter((item) => item.id !== pendingDelete?.id);
+  const recentItems = visibleItems.slice(0, 3);
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <SafeAreaView style={styles.safe} edges={['top']}>
         <StatusBar style="light" />
-        <HudBackdrop />
         <ScrollView
           contentContainerStyle={styles.container}
           keyboardShouldPersistTaps="handled"
@@ -319,111 +692,43 @@ export default function App() {
             <View style={styles.brandRow}>
               <View style={styles.brandMark}>
                 <Text style={styles.brandLetter}>V</Text>
-                <View style={styles.brandMarkDot} />
               </View>
               <View style={styles.brandCopy}>
-                <Text style={styles.brand}>V.O.R.A.</Text>
+                <Text style={styles.brand}>VORA</Text>
                 <Text style={styles.brandSub}>VOICE OPERATED REMINDER ASSISTANT</Text>
               </View>
-              <View style={styles.onlineBadge}>
-                <View style={styles.onlineDot} />
-                <Text style={styles.onlineText}>ONLINE</Text>
+            </View>
+            <View style={styles.headerRule} />
+          </View>
+
+          {activeTab === 'talk' && (
+            <>
+              <View style={styles.hero}>
+                <View style={styles.coreStatusSlot}>
+                  {(listening || busy || thinking) && (
+                    <Text style={styles.coreStatus}>{coreStatus}</Text>
+                  )}
+                </View>
+                <AICore listening={listening} busy={busy} thinking={thinking} onPress={toggle} />
+                {activeEngine && !activeEngine.available && (
+                  <View style={styles.warningPanel}>
+                    <Text style={styles.warningText}>{activeEngine.unavailableReason}</Text>
+                  </View>
+                )}
               </View>
-            </View>
-            <View style={styles.headerRule}>
-              <View style={styles.headerRuleBright} />
-            </View>
-          </View>
 
-          <View style={styles.telemetry}>
-            <TelemetryCell label="CORE" value={thinking ? 'PROCESSING' : 'STABLE'} />
-            <View style={styles.telemetryDivider} />
-            <TelemetryCell label="LANGUAGE" value="TH / AUTO" />
-            <View style={styles.telemetryDivider} />
-            <TelemetryCell label="MEMORY" value={`${items.length} ITEMS`} />
-          </View>
+              <View style={styles.conversation}>
+                {!last && !partial && !thinking && !plan && (
+                  <AssistantMessage text="What would you like me to remember?" />
+                )}
 
-          <View style={styles.hero}>
-            <View style={styles.heroTitleRow}>
-              <View style={styles.microLine} />
-              <Text style={styles.heroEyebrow}>PERSONAL INTELLIGENCE CORE</Text>
-              <View style={styles.microLine} />
-            </View>
-            <Text style={styles.coreStatus}>{coreStatus}</Text>
-            <AICore
-              listening={listening}
-              busy={busy}
-              thinking={thinking}
-              onPress={toggle}
-            />
-            <Text style={[styles.coreHint, (listening || thinking) && styles.coreHintActive]}>
-              {busy
-                ? 'กำลังแปลงเสียงเป็นข้อความ...'
-                : thinking
-                  ? 'กำลังทำความเข้าใจและวางแผนให้คุณ...'
-                  : listening
-                    ? 'พูดได้เลย · แตะอีกครั้งเมื่อพูดจบ'
-                    : 'แตะแกนกลางเพื่อเริ่มสนทนา'}
-            </Text>
-            {activeEngine && !activeEngine.available && (
-              <View style={styles.warningPanel}>
-                <Text style={styles.warningCode}>SYS.WARN</Text>
-                <Text style={styles.warningText}>{activeEngine.unavailableReason}</Text>
-              </View>
-            )}
-          </View>
-
-          <View style={styles.enginePanel}>
-            <View style={styles.panelCornerTopLeft} />
-            <View style={styles.panelCornerBottomRight} />
-            <Text style={styles.panelLabel}>VOICE PROCESSOR</Text>
-            <View style={styles.engineToggle}>
-              {engines.map((candidate) => {
-                const selected = candidate.id === engine;
-                return (
-                  <Pressable
-                    key={candidate.id}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected, disabled: !candidate.available }}
-                    disabled={!candidate.available || listening || busy}
-                    onPress={() => setEngine(candidate.id)}
-                    style={({ pressed }) => [
-                      styles.engineOption,
-                      selected && styles.engineOptionSelected,
-                      !candidate.available && styles.engineOptionDisabled,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <View style={[styles.engineSignal, selected && styles.engineSignalSelected]} />
-                    <View style={styles.engineCopy}>
-                      <Text style={[styles.engineLabel, selected && styles.engineLabelSelected]}>
-                        {candidate.label}
-                      </Text>
-                      <Text style={styles.engineHint} numberOfLines={1}>
-                        {candidate.available ? candidate.hint : candidate.unavailableReason}
-                      </Text>
-                    </View>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
-
-          <CloudSyncPanel />
-
-          <SectionHeader index="01" title="CONVERSATION STREAM" />
-          <View style={styles.conversation}>
-            {!last && !partial && !thinking && !plan && (
-              <AssistantMessage text="สวัสดีครับ วันนี้ให้ผมช่วยจำหรือจัดการอะไรให้ดีครับ?" />
-            )}
-
-            {last && (
-              <UserMessage
-                text={last.text || '(ไม่พบข้อความ)'}
-                meta={`${last.engine === 'cloud' ? 'CLOUD STT' : last.engine === 'device' ? 'ON-DEVICE STT' : 'BROWSER STT'} · ${last.elapsedMs} MS`}
-                onReplay={last.text ? () => speak(last.text) : undefined}
-              />
-            )}
+                {last && (
+                  <UserMessage
+                    text={last.text || '(No transcript)'}
+                    meta={`${last.engine === 'cloud' ? 'CLOUD STT' : last.engine === 'device' ? 'ON-DEVICE STT' : 'BROWSER STT'} · ${last.elapsedMs} MS`}
+                    onReplay={last.text ? () => speak(last.text, { language: config.locale }) : undefined}
+                  />
+                )}
 
             {listening && !!partial && (
               <UserMessage text={partial} meta="LIVE TRANSCRIPT" live />
@@ -435,7 +740,7 @@ export default function App() {
                 <View style={[styles.messageBubble, styles.aiBubble]}>
                   <View style={styles.thinkingLine}>
                     <ActivityIndicator color={colors.primary} size="small" />
-                    <Text style={styles.thinkingText}>กำลังวิเคราะห์เจตนาและบริบท...</Text>
+                    <Text style={styles.thinkingText}>Understanding your intent and context...</Text>
                   </View>
                 </View>
               </View>
@@ -451,7 +756,7 @@ export default function App() {
                         {plan.needs_clarification ? 'VORA / NEEDS INPUT' : 'VORA / RESPONSE'}
                       </Text>
                       <Pressable
-                        accessibilityLabel="พูดคำตอบซ้ำ"
+                        accessibilityLabel="Speak response again"
                         accessibilityRole="button"
                         hitSlop={10}
                         onPress={() =>
@@ -501,7 +806,7 @@ export default function App() {
             )}
 
             {!thinking && last && !plan && !isGroqConfigured() && (
-              <AssistantMessage text="รับเสียงแล้วครับ ขณะนี้กำลังทำงานในโหมดทดสอบเสียง" />
+              <AssistantMessage text="Audio received. Voice test mode is active." />
             )}
 
             {error && (
@@ -510,38 +815,289 @@ export default function App() {
                 <Text style={styles.errorText}>{error}</Text>
               </View>
             )}
-          </View>
-
-          {hasHydrated && items.length > 0 && (
-            <View style={styles.memorySection}>
-              <SectionHeader index="02" title={`MEMORY ARCHIVE · ${items.length}`} />
-              <View style={styles.itemList}>
-                {items.map((item, index) => (
-                  <ItemRow
-                    key={item.id}
-                    index={index + 1}
-                    item={item}
-                    onToggle={() => void handleToggleDone(item)}
-                    onAlertModeChange={() => void handleAlertModeChange(item)}
-                    onSnoozeMinutesChange={() => void handleSnoozeMinutesChange(item)}
-                    onDelete={() => handleDelete(item)}
-                  />
-                ))}
               </View>
+
+              {hasHydrated && recentItems.length > 0 && (
+                <View style={styles.memorySection}>
+                  <View style={styles.cleanSectionHeading}>
+                    <Text style={styles.cleanSectionTitle}>Recent items</Text>
+                    <Pressable accessibilityRole="button" onPress={() => setActiveTab('items')}>
+                      <Text style={styles.seeAll}>View all · {visibleItems.length}</Text>
+                    </Pressable>
+                  </View>
+                  <View style={styles.itemList}>
+                    {recentItems.map((item) => (
+                      <ItemRow
+                        key={item.id}
+                        item={item}
+                        onToggle={() => void handleToggleDone(item)}
+                        onAlertModeChange={() => void handleAlertModeChange(item)}
+                        onSnoozeMinutesChange={() => void handleSnoozeMinutesChange(item)}
+                        onEdit={() => setEditingItem(item)}
+                        onDelete={() => handleDelete(item)}
+                      />
+                    ))}
+                  </View>
+                </View>
+              )}
+            </>
+          )}
+
+          {activeTab === 'items' && (
+            <View style={styles.memorySection}>
+              <View style={styles.cleanSectionHeading}>
+                <View>
+                  <Text style={styles.screenTitle}>Your items</Text>
+                  <Text style={styles.screenSubtitle}>{visibleItems.length} items · Tap to edit · Swipe to delete</Text>
+                </View>
+              </View>
+              {hasHydrated && visibleItems.length ? (
+                <View style={styles.itemList}>
+                  {visibleItems.map((item) => (
+                    <ItemRow
+                      key={item.id}
+                      item={item}
+                      onToggle={() => void handleToggleDone(item)}
+                      onAlertModeChange={() => void handleAlertModeChange(item)}
+                      onSnoozeMinutesChange={() => void handleSnoozeMinutesChange(item)}
+                      onEdit={() => setEditingItem(item)}
+                      onDelete={() => handleDelete(item)}
+                    />
+                  ))}
+                </View>
+              ) : (
+                <View style={styles.emptyState}>
+                  <Ionicons name="file-tray-outline" size={44} color={colors.primary} />
+                  <Text style={styles.emptyTitle}>Nothing here yet</Text>
+                  <Text style={styles.emptyText}>Open Talk and tell VORA what you want to remember.</Text>
+                  <Pressable style={styles.emptyButton} onPress={() => setActiveTab('talk')}>
+                    <Text style={styles.emptyButtonText}>Start talking</Text>
+                  </Pressable>
+                </View>
+              )}
             </View>
           )}
 
-          <View style={styles.promptPanel}>
-            <Text style={styles.promptLabel}>TRY A VOICE COMMAND</Text>
-            <Text style={styles.promptText}>“เตือนกินยาพรุ่งนี้ 9 โมง”</Text>
-            <Text style={styles.promptDivider}>/</Text>
-            <Text style={styles.promptText}>“วันนี้มีอะไรต้องทำบ้าง”</Text>
-          </View>
-          <Text style={styles.footer}>LOCAL-FIRST MEMORY · ASIA/BANGKOK · VORA SYSTEM 01</Text>
+          {activeTab === 'settings' && (
+            <View style={styles.settingsPage}>
+              <View>
+                <Text style={styles.screenTitle}>Settings</Text>
+                <Text style={styles.screenSubtitle}>Voice, alerts, account, and sharing</Text>
+              </View>
+
+              <Text style={styles.settingsSection}>ALERTS</Text>
+              <View style={styles.settingsGroup}>
+                <View style={styles.settingsHeaderRow}>
+                  <Ionicons name="notifications-outline" size={20} color={colors.textMute} />
+                  <View style={styles.settingsRowCopy}>
+                    <Text style={styles.settingsRowLabel}>Default alert</Text>
+                    <Text style={styles.settingsRowHint}>Used when a command doesn't specify one</Text>
+                  </View>
+                </View>
+                <View style={styles.segment}>
+                  {(['notification', 'alarm'] as const).map((mode) => {
+                    const selected = defaultAlertMode === mode;
+                    return (
+                      <Pressable
+                        key={mode}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected }}
+                        onPress={() => setDefaultAlertMode(mode)}
+                        style={[styles.segmentChip, selected && styles.segmentChipActive]}
+                      >
+                        <Ionicons
+                          name={mode === 'notification' ? 'notifications-outline' : 'alarm-outline'}
+                          size={16}
+                          color={selected ? colors.primaryBright : colors.textMute}
+                        />
+                        <Text style={[styles.segmentChipText, selected && styles.segmentChipTextActive]}>
+                          {mode === 'notification' ? 'Notification' : 'Alarm'}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+
+              <Text style={styles.settingsSection}>VOICE PROCESSOR</Text>
+              <View style={styles.settingsGroup}>
+                {engines.map((candidate, index) => {
+                  const selected = candidate.id === engine;
+                  const disabled = !candidate.available || listening || busy;
+                  return (
+                    <View key={candidate.id}>
+                      {index > 0 && <View style={styles.settingsSep} />}
+                      <Pressable
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected, disabled }}
+                        disabled={disabled}
+                        onPress={() => {
+                          setEngine(candidate.id);
+                          setPreferredEngine(candidate.id);
+                        }}
+                        style={({ pressed }) => [
+                          styles.settingsRow,
+                          pressed && styles.settingsRowPressed,
+                          !candidate.available && styles.settingsRowDisabled,
+                        ]}
+                      >
+                        <Ionicons name="mic-outline" size={20} color={selected ? colors.primary : colors.textMute} />
+                        <View style={styles.settingsRowCopy}>
+                          <Text style={[styles.settingsRowLabel, selected && styles.settingsRowLabelActive]}>
+                            {candidate.label}
+                          </Text>
+                          <Text style={styles.settingsRowHint} numberOfLines={2}>
+                            {candidate.available ? candidate.hint : candidate.unavailableReason}
+                          </Text>
+                        </View>
+                        {selected && <Ionicons name="checkmark-circle" size={22} color={colors.primary} />}
+                      </Pressable>
+                    </View>
+                  );
+                })}
+              </View>
+
+              {isBudgetApiConfigured() && (
+                <>
+                  <Text style={styles.settingsSection}>DAILY BUDGET</Text>
+                  <View style={styles.settingsGroup}>
+                    <View style={styles.settingsHeaderRow}>
+                      <Ionicons
+                        name={budgetConnected ? 'wallet' : 'wallet-outline'}
+                        size={20}
+                        color={budgetConnected ? colors.primary : colors.textMute}
+                      />
+                      <View style={styles.settingsRowCopy}>
+                        <Text style={styles.settingsRowLabel}>
+                          {budgetConnected ? 'Connected' : 'Not connected'}
+                        </Text>
+                        <Text style={styles.settingsRowHint}>
+                          {budgetConnected
+                            ? 'Ask about your budget and log expenses by voice'
+                            : 'Link your Daily Budget account to enable budget voice commands'}
+                        </Text>
+                      </View>
+                    </View>
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={budgetBusy}
+                      onPress={budgetConnected ? handleDisconnectBudget : handleConnectBudget}
+                      style={({ pressed }) => [
+                        styles.budgetBtn,
+                        budgetConnected && styles.budgetBtnDisconnect,
+                        pressed && styles.settingsRowPressed,
+                        budgetBusy && styles.settingsRowDisabled,
+                      ]}
+                    >
+                      {budgetBusy ? (
+                        <ActivityIndicator size="small" color={colors.primaryBright} />
+                      ) : (
+                        <>
+                          <Ionicons
+                            name={budgetConnected ? 'unlink-outline' : 'link-outline'}
+                            size={18}
+                            color={budgetConnected ? colors.danger : colors.primaryBright}
+                          />
+                          <Text
+                            style={[
+                              styles.budgetBtnText,
+                              budgetConnected && styles.budgetBtnTextDisconnect,
+                            ]}
+                          >
+                            {budgetConnected ? 'Disconnect' : 'Connect Daily Budget'}
+                          </Text>
+                        </>
+                      )}
+                    </Pressable>
+                  </View>
+                </>
+              )}
+
+              <CloudSyncPanel />
+              <HouseholdPanel />
+            </View>
+          )}
         </ScrollView>
+
+        {pendingDelete && (
+          <View style={styles.undoBar}>
+            <Text style={styles.undoText} numberOfLines={1}>Deleted “{pendingDelete.title}”</Text>
+            <Pressable accessibilityRole="button" hitSlop={8} onPress={handleUndoDelete}>
+              <Text style={styles.undoAction}>UNDO</Text>
+            </Pressable>
+          </View>
+        )}
+
+        <SafeAreaView edges={['bottom']} style={styles.bottomSafeArea}>
+          <BottomNav active={activeTab} onChange={setActiveTab} itemCount={visibleItems.length} />
+        </SafeAreaView>
+        <EditItemModal
+          item={editingItem}
+          onClose={() => setEditingItem(null)}
+          onSave={(patch) => void handleSaveEdit(patch)}
+        />
       </SafeAreaView>
     </SafeAreaProvider>
   );
+}
+
+function BottomNav({
+  active,
+  onChange,
+  itemCount,
+}: {
+  active: AppTab;
+  onChange: (tab: AppTab) => void;
+  itemCount: number;
+}) {
+  const tabs: Array<{ id: AppTab; label: string }> = [
+    { id: 'talk', label: 'TALK' },
+    { id: 'items', label: 'ITEMS' },
+    { id: 'settings', label: 'SETTINGS' },
+  ];
+  return (
+    <View style={styles.bottomNav}>
+      {tabs.map((tab) => {
+        const selected = tab.id === active;
+        return (
+          <Pressable
+            key={tab.id}
+            accessibilityRole="tab"
+            accessibilityState={{ selected }}
+            android_ripple={{ color: colors.primarySoft, borderless: true }}
+            onPress={() => onChange(tab.id)}
+            style={({ pressed }) => [styles.navItem, pressed && styles.pressed]}
+          >
+            <View style={styles.navIconWrap}>
+              <NavIcon id={tab.id} active={selected} />
+              {tab.id === 'items' && itemCount > 0 && (
+                <View style={styles.navCount}><Text style={styles.navCountText}>{Math.min(itemCount, 99)}</Text></View>
+              )}
+            </View>
+            <Text style={[styles.navLabel, selected && styles.navLabelActive]}>{tab.label}</Text>
+            {selected && <View style={styles.navIndicator} />}
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+/** Bottom-nav icons from Ionicons — outline when inactive, filled when active. */
+function NavIcon({ id, active }: { id: AppTab; active: boolean }) {
+  const name =
+    id === 'talk'
+      ? active
+        ? 'mic'
+        : 'mic-outline'
+      : id === 'items'
+        ? active
+          ? 'list'
+          : 'list-outline'
+        : active
+          ? 'settings'
+          : 'settings-outline';
+  return <Ionicons name={name} size={23} color={active ? colors.primary : colors.textFaint} />;
 }
 
 function HudBackdrop() {
@@ -621,7 +1177,7 @@ function UserMessage({
           <Text style={styles.userSender}>YOU / {meta}</Text>
           {onReplay && (
             <Pressable
-              accessibilityLabel="เล่นข้อความเสียงซ้ำ"
+              accessibilityLabel="Replay transcript"
               accessibilityRole="button"
               hitSlop={10}
               onPress={onReplay}
@@ -732,9 +1288,9 @@ function AICore({
 
         <Animated.View style={[styles.corePulse, { transform: [{ scale: pulse }] }]}>
           <Pressable
-            accessibilityLabel={listening ? 'หยุดฟัง' : 'เริ่มพูด'}
+            accessibilityLabel={listening ? 'Stop listening' : 'Start talking'}
             accessibilityRole="button"
-            disabled={busy}
+            disabled={busy || thinking}
             onPress={onPress}
             style={({ pressed }) => [
               styles.coreButton,
@@ -747,9 +1303,17 @@ function AICore({
               <ActivityIndicator color={colors.primaryBright} size="large" />
             ) : (
               <>
-                <MicGlyph active={active} />
+                {listening ? (
+                  <Ionicons name="stop" size={30} color={colors.danger} />
+                ) : (
+                  <Ionicons
+                    name="mic-outline"
+                    size={42}
+                    color={active ? colors.primaryBright : colors.primary}
+                  />
+                )}
                 <Text style={styles.coreButtonLabel}>
-                  {thinking ? 'THINKING' : listening ? 'LISTENING' : 'TAP TO TALK'}
+                  {thinking ? 'THINKING' : listening ? 'TAP TO STOP' : 'TAP TO TALK'}
                 </Text>
                 <View style={styles.waveform}>
                   {WAVEFORM_HEIGHTS.map((height, index) => (
@@ -774,59 +1338,49 @@ function AICore({
   );
 }
 
-function MicGlyph({ active }: { active: boolean }) {
-  return (
-    <View style={styles.micGlyph}>
-      <View style={[styles.micCapsule, active && styles.micCapsuleActive]}>
-        <View style={styles.micCapsuleLine} />
-      </View>
-      <View style={styles.micShoulder} />
-      <View style={styles.micStem} />
-      <View style={styles.micBase} />
-    </View>
-  );
-}
 
-const TYPE_META: Record<Item['type'], { icon: string; label: string }> = {
-  reminder: { icon: '◴', label: 'REMINDER' },
-  event: { icon: '◇', label: 'EVENT' },
-  todo: { icon: '☑', label: 'TODO' },
-  note: { icon: '≡', label: 'NOTE' },
+type IoniconName = keyof typeof Ionicons.glyphMap;
+const TYPE_META: Record<Item['type'], { icon: IoniconName; label: string }> = {
+  reminder: { icon: 'alarm-outline', label: 'REMINDER' },
+  event: { icon: 'calendar-outline', label: 'EVENT' },
+  todo: { icon: 'checkbox-outline', label: 'TODO' },
+  note: { icon: 'document-text-outline', label: 'NOTE' },
 };
 
 /** Build the referable-items list the brain uses to resolve "อันแรก" etc.
  *  Includes the raw ISO start so the model can edit time while keeping the day. */
-function toReferents(items: Item[]): Referent[] {
-  return items.slice(0, 8).map((item) => {
+function toReferents(items: Item[], limit = 8): Referent[] {
+  return items.slice(0, limit).map((item) => {
     const when = formatDateTime(item.start_at, item.all_day);
     const iso = item.start_at ? ` {${item.start_at}}` : '';
     const mode =
       item.type === 'reminder'
         ? ` [${
             item.remind_until_done
-              ? 'ปลุกจนกว่าจะทำ'
+              ? 'UNTIL DONE'
               : item.alert_mode === 'alarm'
-                ? 'นาฬิกาปลุก'
-                : 'แจ้งเตือน'
+                ? 'ALARM'
+                : 'NOTIFICATION'
           }]`
         : '';
-    return { ref: item.id, label: `${item.title}${when ? ` — ${when}` : ''}${mode}${iso}` };
+    const state = item.done ? ' [DONE]' : '';
+    return { ref: item.id, label: `${item.title}${when ? ` — ${when}` : ''}${mode}${state}${iso}` };
   });
 }
 
 function ItemRow({
   item,
-  index,
   onToggle,
   onAlertModeChange,
   onSnoozeMinutesChange,
+  onEdit,
   onDelete,
 }: {
   item: Item;
-  index: number;
   onToggle: () => void;
   onAlertModeChange: () => void;
   onSnoozeMinutesChange: () => void;
+  onEdit: () => void;
   onDelete: () => void;
 }) {
   const when = formatDateTime(item.start_at, item.all_day);
@@ -838,84 +1392,166 @@ function ItemRow({
   const meta = TYPE_META[item.type];
 
   return (
-    <View style={[styles.itemRow, item.done && styles.itemRowDone]}>
-      <Text style={styles.itemIndex}>{String(index).padStart(2, '0')}</Text>
+    <SwipeableRow onDelete={onDelete}>
       <Pressable
-        accessibilityLabel={item.done ? `ยกเลิกสถานะเสร็จของ ${item.title}` : `ทำ ${item.title} เสร็จ`}
-        accessibilityRole="checkbox"
-        accessibilityState={{ checked: item.done }}
-        hitSlop={8}
-        onPress={onToggle}
-        style={[styles.itemIcon, item.done && styles.itemIconDone]}
+        accessibilityLabel={`Edit ${item.title}`}
+        accessibilityHint="Opens the editor. Swipe left to delete."
+        android_ripple={{ color: colors.primarySoft }}
+        onPress={onEdit}
+        style={({ pressed }) => [
+          styles.itemRow,
+          item.done && styles.itemRowDone,
+          pressed && styles.itemRowPressed,
+        ]}
       >
-        <Text style={styles.itemIconText}>{item.done ? '✓' : meta.icon}</Text>
-      </Pressable>
-      <View style={styles.itemBody}>
-        <View style={styles.itemTypeRow}>
-          <Text style={styles.itemType}>{meta.label}</Text>
-          <View style={styles.itemTypeLine} />
-        </View>
-        <Text style={[styles.itemTitle, item.done && styles.itemTitleDone]} numberOfLines={1}>
-          {item.title}
-        </Text>
-        {!!detail && <Text style={styles.itemSub}>{detail}</Text>}
-      </View>
-      {item.type === 'reminder' && (
-        <View style={styles.alertControls}>
-          <Pressable
-            accessibilityLabel={`เปลี่ยนรูปแบบการเตือนของ ${item.title}`}
-            accessibilityHint="วนระหว่างแจ้งเตือน นาฬิกาปลุก และปลุกจนกว่าจะทำ"
-            accessibilityRole="button"
-            hitSlop={8}
-            onPress={onAlertModeChange}
-            style={[
-              styles.alertModeButton,
-              item.alert_mode === 'alarm' && styles.alertModeButtonAlarm,
-            ]}
-          >
-            <Text
-              style={[
-                styles.alertModeText,
-                item.alert_mode === 'alarm' && styles.alertModeTextAlarm,
-              ]}
-            >
-              {item.remind_until_done
-                ? '🔁 UNTIL DONE'
-                : item.alert_mode === 'alarm'
-                  ? '⏰ ALARM'
-                  : '🔔 NOTIFY'}
-            </Text>
-          </Pressable>
-          {item.alert_mode === 'alarm' && (
-            <Pressable
-              accessibilityLabel={`เปลี่ยนเวลาเลื่อนปลุกของ ${item.title}`}
-              accessibilityRole="button"
-              hitSlop={6}
-              onPress={onSnoozeMinutesChange}
-              style={styles.snoozeButton}
-            >
-              <Text style={styles.snoozeText}>
-                SNOOZE {item.snooze_minutes}M · ×{item.max_attempts}
-              </Text>
-            </Pressable>
+        <Pressable
+          accessibilityLabel={item.done ? `Mark ${item.title} as not done` : `Mark ${item.title} as done`}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: item.done }}
+          hitSlop={10}
+          onPress={onToggle}
+          style={[styles.itemIcon, item.done && styles.itemIconDone]}
+        >
+          <Ionicons
+            name={item.done ? 'checkmark' : meta.icon}
+            size={18}
+            color={item.done ? colors.success : colors.primaryBright}
+          />
+        </Pressable>
+        <View style={styles.itemBody}>
+          <View style={styles.itemTypeRow}>
+            <Text style={styles.itemType}>{meta.label}</Text>
+            {!!item.household_id && <Text style={styles.sharedBadge}>SHARED</Text>}
+          </View>
+          <Text style={[styles.itemTitle, item.done && styles.itemTitleDone]} numberOfLines={1}>
+            {item.title}
+          </Text>
+          {!!detail && <Text style={styles.itemSub}>{detail}</Text>}
+          {item.type === 'reminder' && (
+            <View style={styles.alertControls}>
+              <Pressable
+                accessibilityLabel={`Change alert type for ${item.title}`}
+                accessibilityHint="Cycles through notification, alarm, and until done"
+                accessibilityRole="button"
+                hitSlop={8}
+                onPress={onAlertModeChange}
+                style={[
+                  styles.alertModeButton,
+                  item.alert_mode === 'alarm' && styles.alertModeButtonAlarm,
+                ]}
+              >
+                <Ionicons
+                  name={
+                    item.remind_until_done
+                      ? 'repeat'
+                      : item.alert_mode === 'alarm'
+                        ? 'alarm'
+                        : 'notifications-outline'
+                  }
+                  size={12}
+                  color={item.alert_mode === 'alarm' ? colors.warning : colors.textFaint}
+                />
+                <Text
+                  style={[
+                    styles.alertModeText,
+                    item.alert_mode === 'alarm' && styles.alertModeTextAlarm,
+                  ]}
+                >
+                  {item.remind_until_done
+                    ? 'UNTIL DONE'
+                    : item.alert_mode === 'alarm'
+                      ? 'ALARM'
+                      : 'NOTIFY'}
+                </Text>
+              </Pressable>
+              {item.alert_mode === 'alarm' && (
+                <Pressable
+                  accessibilityLabel={`Change snooze time for ${item.title}`}
+                  accessibilityRole="button"
+                  hitSlop={6}
+                  onPress={onSnoozeMinutesChange}
+                  style={styles.snoozeButton}
+                >
+                  <Text style={styles.snoozeText}>
+                    SNOOZE {item.snooze_minutes}M · ×{item.max_attempts}
+                  </Text>
+                </Pressable>
+              )}
+            </View>
           )}
         </View>
-      )}
-      <Pressable
-        accessibilityLabel={`ลบ ${item.title}`}
-        accessibilityRole="button"
-        hitSlop={10}
-        onPress={onDelete}
-        style={styles.deleteButton}
-      >
-        <Text style={styles.deleteText}>×</Text>
+        <Ionicons name="chevron-forward" size={18} color={colors.textFaint} style={styles.itemChevron} />
       </Pressable>
+    </SwipeableRow>
+  );
+}
+
+/** Native-feeling row: tap opens the editor, swipe left past the threshold
+ *  deletes (routing through the same undo bar as the button did). Built on
+ *  PanResponder + Animated so it needs no gesture-handler dependency and works
+ *  on web too. Only claims horizontal drags, leaving vertical scroll to the list. */
+function SwipeableRow({ onDelete, children }: { onDelete: () => void; children: ReactNode }) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const onDeleteRef = useRef(onDelete);
+  onDeleteRef.current = onDelete;
+
+  const pan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_evt, g) =>
+        Math.abs(g.dx) > 14 && Math.abs(g.dx) > Math.abs(g.dy) * 1.6,
+      onPanResponderMove: (_evt, g) => {
+        translateX.setValue(Math.max(-160, Math.min(0, g.dx)));
+      },
+      onPanResponderRelease: (_evt, g) => {
+        const shouldDelete = g.dx < -96 || g.vx < -0.55;
+        if (shouldDelete) {
+          Animated.timing(translateX, {
+            toValue: -600,
+            duration: 200,
+            easing: Easing.in(Easing.ease),
+            useNativeDriver: true,
+          }).start(() => onDeleteRef.current());
+        } else {
+          Animated.spring(translateX, {
+            toValue: 0,
+            bounciness: 6,
+            useNativeDriver: true,
+          }).start();
+        }
+      },
+      onPanResponderTerminate: () => {
+        Animated.spring(translateX, { toValue: 0, useNativeDriver: true }).start();
+      },
+    }),
+  ).current;
+
+  const backdropOpacity = translateX.interpolate({
+    inputRange: [-96, -32, 0],
+    outputRange: [1, 0.5, 0],
+    extrapolate: 'clamp',
+  });
+
+  return (
+    <View style={styles.swipeContainer}>
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.swipeBackdrop, { opacity: backdropOpacity }]}
+      >
+        <View style={styles.swipeDeleteBadge}>
+          <Ionicons name="trash-outline" size={22} color="#fff" />
+          <Text style={styles.swipeDeleteLabel}>DELETE</Text>
+        </View>
+      </Animated.View>
+      <Animated.View style={{ transform: [{ translateX }] }} {...pan.panHandlers}>
+        {children}
+      </Animated.View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg },
+  bottomSafeArea: { backgroundColor: colors.bgAlt },
   backdrop: { position: 'absolute', inset: 0, overflow: 'hidden' },
   gridHorizontal: {
     position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth,
@@ -935,7 +1571,7 @@ const styles = StyleSheet.create({
   },
   container: {
     flexGrow: 1, paddingHorizontal: spacing.lg, paddingTop: spacing.md,
-    paddingBottom: spacing.xl, gap: spacing.lg,
+    paddingBottom: spacing.xl, gap: spacing.xl,
   },
   header: { gap: spacing.md },
   brandRow: { flexDirection: 'row', alignItems: 'center' },
@@ -948,24 +1584,10 @@ const styles = StyleSheet.create({
     color: colors.primaryBright, fontSize: font.lg, fontWeight: '300',
     transform: [{ rotate: '-45deg' }],
   },
-  brandMarkDot: {
-    position: 'absolute', width: 4, height: 4, backgroundColor: colors.primary, top: 3, right: 3,
-  },
-  brandCopy: { flex: 1, marginLeft: spacing.lg, gap: 2 },
-  brand: { color: colors.text, fontSize: font.lg, fontWeight: '800', letterSpacing: 4 },
+  brandCopy: { flex: 1, marginLeft: spacing.lg, gap: 3 },
+  brand: { color: colors.text, fontSize: font.xl, fontWeight: '800', letterSpacing: 6 },
   brandSub: { color: colors.textFaint, fontSize: 8, letterSpacing: 1.25 },
-  onlineBadge: {
-    flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1,
-    borderColor: colors.border, backgroundColor: 'rgba(87, 242, 177, 0.04)',
-    paddingHorizontal: spacing.sm, paddingVertical: 6,
-  },
-  onlineDot: {
-    width: 5, height: 5, borderRadius: radius.pill, backgroundColor: colors.success,
-    shadowColor: colors.success, shadowOpacity: 0.8, shadowRadius: 5,
-  },
-  onlineText: { color: colors.success, fontSize: 8, fontWeight: '800', letterSpacing: 1.2 },
-  headerRule: { height: 1, backgroundColor: colors.border },
-  headerRuleBright: { width: 72, height: 1, backgroundColor: colors.primary },
+  headerRule: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border },
   telemetry: {
     flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm,
     borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth,
@@ -979,9 +1601,9 @@ const styles = StyleSheet.create({
   heroTitleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   microLine: { width: 22, height: 1, backgroundColor: colors.borderBright },
   heroEyebrow: { color: colors.textFaint, fontSize: 8, fontWeight: '700', letterSpacing: 2 },
+  coreStatusSlot: { minHeight: 30, justifyContent: 'center', marginTop: spacing.sm },
   coreStatus: {
-    color: colors.primaryBright, fontSize: font.xl, fontWeight: '300', letterSpacing: 1.5,
-    marginTop: spacing.sm,
+    color: colors.primaryBright, fontSize: font.lg, fontWeight: '400', letterSpacing: 3,
   },
   coreStage: { width: 286, height: 286, marginTop: spacing.sm },
   coreVisual: { width: 286, height: 286, alignItems: 'center', justifyContent: 'center' },
@@ -1028,20 +1650,6 @@ const styles = StyleSheet.create({
   },
   coreButtonListening: { backgroundColor: '#07303B' },
   coreButtonPressed: { opacity: 0.75 },
-  micGlyph: { width: 38, height: 47, alignItems: 'center' },
-  micCapsule: {
-    width: 21, height: 30, borderRadius: 11, borderWidth: 1.5,
-    borderColor: colors.textMute, alignItems: 'center', paddingTop: 6,
-  },
-  micCapsuleActive: { borderColor: colors.primaryBright },
-  micCapsuleLine: { width: 7, height: 1, backgroundColor: colors.primary },
-  micShoulder: {
-    position: 'absolute', top: 16, width: 31, height: 20,
-    borderLeftWidth: 1.5, borderRightWidth: 1.5, borderBottomWidth: 1.5,
-    borderColor: colors.primary, borderBottomLeftRadius: 15, borderBottomRightRadius: 15,
-  },
-  micStem: { width: 1.5, height: 7, backgroundColor: colors.primary },
-  micBase: { width: 16, height: 1.5, backgroundColor: colors.primary },
   coreButtonLabel: {
     color: colors.primaryBright, fontSize: 8, fontWeight: '800', letterSpacing: 1.4,
   },
@@ -1073,25 +1681,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: 2, borderRightWidth: 2, borderColor: colors.primary,
   },
   panelLabel: { color: colors.textFaint, fontSize: 8, fontWeight: '700', letterSpacing: 1.5 },
-  engineToggle: { flexDirection: 'row', gap: spacing.sm },
-  engineOption: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, minWidth: 0,
-    padding: spacing.sm, borderWidth: 1, borderColor: 'transparent',
-    backgroundColor: 'rgba(255, 255, 255, 0.015)',
-  },
-  engineOptionSelected: { borderColor: colors.borderBright, backgroundColor: colors.primarySoft },
-  engineOptionDisabled: { opacity: 0.35 },
-  engineSignal: {
-    width: 7, height: 7, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.textFaint,
-  },
-  engineSignalSelected: {
-    backgroundColor: colors.primary, borderColor: colors.primaryBright,
-    shadowColor: colors.primary, shadowOpacity: 0.8, shadowRadius: 5,
-  },
-  engineCopy: { flex: 1, minWidth: 0, gap: 2 },
-  engineLabel: { color: colors.textMute, fontSize: font.xs, fontWeight: '700' },
-  engineLabelSelected: { color: colors.primaryBright },
-  engineHint: { color: colors.textFaint, fontSize: 8 },
   pressed: { opacity: 0.7 },
   sectionHeader: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.sm,
@@ -1179,11 +1768,20 @@ const styles = StyleSheet.create({
   itemList: { gap: spacing.sm },
   itemRow: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    backgroundColor: 'rgba(6, 22, 30, 0.88)', borderWidth: 1,
+    backgroundColor: colors.card, borderWidth: 1, borderRadius: radius.lg,
     borderColor: colors.border, padding: spacing.md,
   },
   itemRowDone: { opacity: 0.48 },
-  itemIndex: { color: colors.textFaint, fontSize: 8, width: 16 },
+  itemRowPressed: { backgroundColor: colors.cardRaised, borderColor: colors.borderBright },
+  itemChevron: { marginLeft: spacing.xs },
+  swipeContainer: { position: 'relative' },
+  swipeBackdrop: {
+    position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, borderRadius: radius.lg,
+    backgroundColor: colors.danger, alignItems: 'flex-end', justifyContent: 'center',
+    paddingRight: spacing.xl,
+  },
+  swipeDeleteBadge: { alignItems: 'center', gap: 1 },
+  swipeDeleteLabel: { color: '#fff', fontSize: 8, fontWeight: '900', letterSpacing: 1.4 },
   itemIcon: {
     width: 34, height: 34, borderRadius: 17, borderWidth: 1, borderColor: colors.borderBright,
     alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft,
@@ -1191,36 +1789,47 @@ const styles = StyleSheet.create({
   itemIconDone: {
     borderColor: colors.success, backgroundColor: 'rgba(87, 242, 177, 0.08)',
   },
-  itemIconText: { color: colors.primaryBright, fontSize: font.md },
   itemBody: { flex: 1, gap: 3, minWidth: 0 },
   itemTypeRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   itemType: { color: colors.primary, fontSize: 7, fontWeight: '800', letterSpacing: 1.2 },
+  sharedBadge: {
+    color: colors.success, fontSize: 7, fontWeight: '800', letterSpacing: 0.8,
+    backgroundColor: 'rgba(87, 242, 177, 0.08)', paddingHorizontal: 5, paddingVertical: 2,
+    borderRadius: radius.pill,
+  },
   itemTypeLine: { width: 18, height: StyleSheet.hairlineWidth, backgroundColor: colors.borderBright },
   itemTitle: { color: colors.text, fontSize: font.sm, fontWeight: '700' },
   itemTitleDone: { color: colors.textMute, textDecorationLine: 'line-through' },
   itemSub: { color: colors.textFaint, fontSize: font.xs },
   alertModeButton: {
-    minWidth: 76, height: 28, paddingHorizontal: 7, borderWidth: 1,
-    borderColor: colors.border, alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(68, 241, 255, 0.03)',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4,
+    minWidth: 76, height: 28, paddingHorizontal: 9, borderWidth: 1, borderRadius: radius.pill,
+    borderColor: colors.border, backgroundColor: 'rgba(68, 241, 255, 0.03)',
   },
   alertModeButtonAlarm: {
     borderColor: colors.warning, backgroundColor: 'rgba(255, 209, 102, 0.08)',
   },
   alertModeText: { color: colors.textFaint, fontSize: 7, fontWeight: '800', letterSpacing: 0.7 },
   alertModeTextAlarm: { color: colors.warning },
-  alertControls: { alignItems: 'stretch', gap: 4 },
+  alertControls: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 6 },
   snoozeButton: {
-    minWidth: 76, height: 20, paddingHorizontal: 5, borderWidth: 1,
+    height: 28, paddingHorizontal: 10, borderWidth: 1, borderRadius: radius.pill,
     borderColor: colors.border, alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255, 209, 102, 0.035)',
   },
   snoozeText: { color: colors.textFaint, fontSize: 6, fontWeight: '700', letterSpacing: 0.35 },
   deleteButton: {
     width: 28, height: 28, borderWidth: 1, borderColor: colors.border,
-    alignItems: 'center', justifyContent: 'center',
+    borderRadius: radius.sm, alignItems: 'center', justifyContent: 'center',
   },
   deleteText: { color: colors.textFaint, fontSize: font.lg, lineHeight: 21 },
+  rowActions: { gap: 5 },
+  editButton: {
+    width: 28, height: 28, borderWidth: 1, borderColor: colors.borderBright,
+    borderRadius: radius.sm, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.primarySoft,
+  },
+  editText: { color: colors.primary, fontSize: font.md, lineHeight: 20 },
   promptPanel: {
     flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center',
     columnGap: spacing.sm, rowGap: spacing.xs, marginTop: spacing.sm, padding: spacing.md,
@@ -1233,4 +1842,50 @@ const styles = StyleSheet.create({
   promptText: { color: colors.textMute, fontSize: font.xs },
   promptDivider: { color: colors.primaryDark, fontSize: font.xs },
   footer: { color: colors.textFaint, fontSize: 7, letterSpacing: 1, textAlign: 'center' },
+  cleanSectionHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md },
+  cleanSectionTitle: { color: colors.text, fontSize: font.lg, fontWeight: '800' },
+  seeAll: { color: colors.primary, fontSize: font.xs, fontWeight: '700' },
+  screenTitle: { color: colors.text, fontSize: font.xl, fontWeight: '900' },
+  screenSubtitle: { color: colors.textMute, fontSize: font.sm, marginTop: 4 },
+  emptyState: { alignItems: 'center', gap: spacing.sm, paddingVertical: 70, paddingHorizontal: spacing.xl },
+  emptyTitle: { color: colors.text, fontSize: font.lg, fontWeight: '800' },
+  emptyText: { color: colors.textMute, fontSize: font.sm, textAlign: 'center', lineHeight: 20 },
+  emptyButton: { marginTop: spacing.md, borderRadius: radius.md, backgroundColor: colors.primaryDark, paddingHorizontal: spacing.xl, paddingVertical: spacing.md },
+  emptyButtonText: { color: colors.onPrimary, fontSize: font.sm, fontWeight: '800' },
+  settingsPage: { gap: spacing.xs },
+  settingsSection: { color: colors.textFaint, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginTop: spacing.lg, marginBottom: spacing.sm, marginLeft: spacing.xs },
+  settingsGroup: { backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
+  settingsRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, minHeight: 58, paddingVertical: spacing.md, paddingHorizontal: spacing.lg },
+  settingsRowPressed: { backgroundColor: colors.cardRaised },
+  settingsRowDisabled: { opacity: 0.4 },
+  settingsHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingTop: spacing.md, paddingHorizontal: spacing.lg },
+  settingsRowCopy: { flex: 1, minWidth: 0, gap: 2 },
+  settingsRowLabel: { color: colors.text, fontSize: font.md, fontWeight: '600' },
+  settingsRowLabelActive: { color: colors.primaryBright },
+  settingsRowHint: { color: colors.textMute, fontSize: font.xs, lineHeight: 16 },
+  settingsSep: { height: 1, backgroundColor: colors.border, marginLeft: 52 },
+  segment: { flexDirection: 'row', gap: spacing.xs, backgroundColor: colors.cardRaised, borderRadius: radius.md, padding: spacing.xs, margin: spacing.md, marginTop: spacing.sm },
+  segmentChip: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 9, borderRadius: radius.sm, borderWidth: 1, borderColor: 'transparent' },
+  segmentChipActive: { backgroundColor: colors.primarySoft, borderColor: colors.primaryDark },
+  segmentChipText: { color: colors.textMute, fontSize: font.sm, fontWeight: '700' },
+  segmentChipTextActive: { color: colors.primaryBright },
+  budgetBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    marginTop: spacing.md, paddingVertical: 12, borderRadius: radius.sm,
+    borderWidth: 1, borderColor: colors.primaryDark, backgroundColor: colors.primarySoft,
+  },
+  budgetBtnDisconnect: { backgroundColor: colors.dangerSoft, borderColor: colors.danger },
+  budgetBtnText: { color: colors.primaryBright, fontSize: font.sm, fontWeight: '800', letterSpacing: 0.4 },
+  budgetBtnTextDisconnect: { color: colors.danger },
+  undoBar: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, backgroundColor: '#16303A', borderTopWidth: 1, borderColor: colors.borderBright, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
+  undoText: { flex: 1, color: colors.text, fontSize: font.sm },
+  undoAction: { color: colors.primary, fontSize: font.sm, fontWeight: '900' },
+  bottomNav: { minHeight: 68, flexDirection: 'row', backgroundColor: colors.bgAlt, borderTopWidth: 1, borderColor: colors.border },
+  navItem: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 3, position: 'relative' },
+  navIconWrap: { position: 'relative', minWidth: 28, alignItems: 'center' },
+  navLabel: { color: colors.textFaint, fontSize: font.xs, fontWeight: '700' },
+  navLabelActive: { color: colors.primaryBright },
+  navIndicator: { position: 'absolute', top: 0, width: 38, height: 2, borderRadius: 1, backgroundColor: colors.primary },
+  navCount: { position: 'absolute', right: -5, top: -5, minWidth: 17, height: 17, borderRadius: 9, backgroundColor: colors.danger, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 },
+  navCountText: { color: '#fff', fontSize: 8, fontWeight: '900' },
 });

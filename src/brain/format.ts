@@ -7,56 +7,69 @@ const TZ = 'Asia/Bangkok';
 export function toolLabel(tool: ToolName): string {
   switch (tool) {
     case 'create_reminder':
-      return '⏰ เตือน';
+      return '⏰ REMINDER';
     case 'create_event':
-      return '📅 เหตุการณ์';
+      return '📅 EVENT';
     case 'create_todo':
-      return '☑️ งาน';
+      return '☑️ TODO';
     case 'create_note':
-      return '📝 โน้ต';
+      return '📝 NOTE';
     case 'record_expense':
-      return '💸 รายจ่าย';
+      return '💸 EXPENSE';
     case 'query':
-      return '🔍 คำถาม';
+      return '🔍 QUERY';
+    case 'query_budget':
+      return '💰 BUDGET';
+    case 'update_expense':
+      return '✏️ EDIT EXPENSE';
+    case 'delete_expense':
+      return '🗑 DELETE EXPENSE';
     case 'update_item':
-      return '✏️ แก้ไข';
+      return '✏️ UPDATE';
     case 'delete_item':
-      return '🗑 ยกเลิก';
+      return '🗑 DELETE';
+    case 'delete_items':
+      return '🗑 BULK DELETE';
     default:
       return '❓';
   }
 }
 
-/** e.g. "อา. 31 ส.ค. 09:00 น." or "อา. 31 ส.ค. (ทั้งวัน)" */
+/** e.g. "Sun, Aug 31 · 09:00" or "Sun, Aug 31 (all day)" */
 export function formatDateTime(iso: string | null, allDay: boolean): string | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  const date = new Intl.DateTimeFormat('th-TH', {
+  const date = new Intl.DateTimeFormat('en-US', {
     timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short',
   }).format(d);
-  if (allDay) return `${date} (ทั้งวัน)`;
-  const time = new Intl.DateTimeFormat('th-TH', {
+  if (allDay) return `${date} (all day)`;
+  const time = new Intl.DateTimeFormat('en-US', {
     timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false,
   }).format(d);
-  return `${date} ${time} น.`;
+  return `${date} · ${time}`;
 }
 
-const DAY_TH: Record<string, string> = {
-  MO: 'จ.', TU: 'อ.', WE: 'พ.', TH: 'พฤ.', FR: 'ศ.', SA: 'ส.', SU: 'อา.',
+const DAY_LABEL: Record<string, string> = {
+  MO: 'Mon', TU: 'Tue', WE: 'Wed', TH: 'Thu', FR: 'Fri', SA: 'Sat', SU: 'Sun',
 };
-const FREQ_TH: Record<Recurrence['freq'], string> = {
-  daily: 'ทุกวัน', weekly: 'ทุกสัปดาห์', monthly: 'ทุกเดือน', yearly: 'ทุกปี',
+const FREQ_LABEL: Record<Recurrence['freq'], string> = {
+  daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly', yearly: 'Yearly',
+};
+const FREQ_UNIT: Record<Recurrence['freq'], string> = {
+  daily: 'days', weekly: 'weeks', monthly: 'months', yearly: 'years',
 };
 
 export function formatRecurrence(r: Recurrence | null): string | null {
   if (!r) return null;
-  const every = r.interval > 1 ? `ทุก ${r.interval} ` : '';
   if (r.freq === 'weekly' && r.byday?.length) {
-    const days = r.byday.map((d) => DAY_TH[d] ?? d).join(' ');
-    return `🔁 ${every}สัปดาห์: ${days}`.trim();
+    const days = r.byday.map((d) => DAY_LABEL[d] ?? d).join(' ');
+    const frequency = r.interval > 1 ? `Every ${r.interval} weeks` : 'Weekly';
+    return `🔁 ${frequency}: ${days}`;
   }
-  return `🔁 ${every ? `${every}(${FREQ_TH[r.freq]})` : FREQ_TH[r.freq]}`;
+  return r.interval > 1
+    ? `🔁 Every ${r.interval} ${FREQ_UNIT[r.freq]}`
+    : `🔁 ${FREQ_LABEL[r.freq]}`;
 }
 
 /** Rows of { label, value } describing one action, for the preview card. */
@@ -64,29 +77,40 @@ export function describeAction(a: BrainAction): Array<{ label: string; value: st
   const rows: Array<{ label: string; value: string }> = [];
   const when = formatDateTime(a.datetime, a.all_day);
   const end = formatDateTime(a.end_datetime, a.all_day);
-  if (when) rows.push({ label: 'เมื่อ', value: end ? `${when} – ${end}` : when });
+  if (when) rows.push({ label: 'When', value: end ? `${when} – ${end}` : when });
   const rec = formatRecurrence(a.recurrence);
-  if (rec) rows.push({ label: 'ซ้ำ', value: rec });
+  if (rec) rows.push({ label: 'Repeats', value: rec });
   if (
     a.tool === 'create_reminder' ||
     (a.tool === 'update_item' && (a.alert_mode || a.remind_until_done != null))
   ) {
     rows.push({
-      label: 'รูปแบบ',
+      label: 'Alert',
       value: a.remind_until_done
-        ? '🔁 ปลุกจนกว่าจะทำ'
+        ? '🔁 Until done'
         : a.alert_mode === 'alarm'
-          ? '⏰ นาฬิกาปลุก'
-          : '🔔 แจ้งเตือน',
+          ? '⏰ Alarm'
+          : '🔔 Notification',
     });
   }
   if (a.snooze_minutes && (a.alert_mode === 'alarm' || a.remind_until_done)) {
-    rows.push({ label: 'เลื่อนปลุก', value: `${a.snooze_minutes} นาที` });
+    rows.push({ label: 'Snooze', value: `${a.snooze_minutes} minutes` });
   }
   if (a.remind_until_done && a.max_attempts) {
-    rows.push({ label: 'เตือนสูงสุด', value: `${a.max_attempts} รอบ` });
+    rows.push({ label: 'Attempts', value: `${a.max_attempts} times` });
   }
-  if (a.amount != null) rows.push({ label: 'จำนวน', value: `${a.amount} บาท` });
-  if (a.body) rows.push({ label: 'รายละเอียด', value: a.body });
+  if (a.amount != null) rows.push({ label: 'Amount', value: `THB ${a.amount}` });
+  if (a.delete_scope) {
+    rows.push({
+      label: 'Scope',
+      value:
+        a.delete_scope === 'past'
+          ? 'Past items'
+          : a.delete_scope === 'done'
+            ? 'Completed items'
+            : 'All items',
+    });
+  }
+  if (a.body) rows.push({ label: 'Details', value: a.body });
   return rows;
 }

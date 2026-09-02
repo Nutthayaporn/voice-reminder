@@ -1,4 +1,4 @@
-// V.O.R.A. app-shell service worker. App data remains local-first in
+// VORA app-shell service worker. App data remains local-first in
 // AsyncStorage/localStorage; only same-origin static files are cached here.
 const CACHE = 'vora-shell-dev';
 const PRECACHE = ['/', '/manifest.json'];

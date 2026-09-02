@@ -1,4 +1,4 @@
-# 🎙️ Voice Reminder
+# 🎙️ VORA
 
 แอปผู้ช่วยส่วนตัวแบบ **สั่งงานด้วยเสียงล้วน** — พูดสิ่งที่อยากจด/เตือน/ถาม แล้วแอปเข้าใจ
 บันทึก และ **ตอบกลับด้วยเสียง** เกิดมาแก้ pain point เดียว: *อยากจดแต่ขี้เกียจพิมพ์เพราะมือ
@@ -6,7 +6,12 @@
 
 > สถานะปัจจุบัน: **Phase 0–4 + Web/PWA เสร็จ** — พูด → เข้าใจ → บันทึก → เตือน → ตอบ
 > และต่อ daily-budget แล้ว. สมองเป็น **Action Plan** (1 ประโยคทำได้หลายคำสั่ง) +
-> มี type `todo`; บน Chrome/Edge ใช้ Web Speech API และติดตั้งเป็น PWA ได้
+> มี type `todo`; บน Chrome/Edge ใช้ Web Speech API และติดตั้งเป็น PWA ได้. UI แยกเป็น
+> พูด/รายการ/ตั้งค่า พร้อมแก้ไข, Undo การลบ, ค่าเตือนเริ่มต้น และ shared household
+
+คำสั่งลบด้วยเสียงรองรับทั้งรายการเดียวตามชื่อ/ลำดับ และลบเป็นกลุ่ม เช่น “ลบรายการที่เลยไปแล้ว”
+หรือ “ลบรายการที่ทำเสร็จแล้ว”. การลบหลายรายการต้องพูด “ยืนยัน” ก่อนจึงจะลบจริง
+รัน regression test ส่วนนี้ได้ด้วย `npm run test:delete`
 
 ---
 
@@ -61,7 +66,7 @@
 
 | ไฟล์ | หน้าที่ |
 | --- | --- |
-| `App.tsx` | หน้าจอเดียว: ปุ่มไมค์ + สวิตช์ engine + แสดงผล + พูดกลับ |
+| `App.tsx` | navigation พูด/รายการ/ตั้งค่า + ปุ่มไมค์ + แสดงผล + พูดกลับ |
 | `src/speech/types.ts` | **สัญญากลาง** ของ speech (engine id, status, ผลลัพธ์) |
 | `src/speech/useVoiceInput.ts` | หัวใจ push-to-talk — คุมการอัด/ฟังแล้วส่ง transcript ออกทาง `onResult` |
 | `src/speech/cloudGroq.ts` | STT ฝั่ง cloud — อัพโหลดเสียงไป Groq Whisper |
@@ -139,12 +144,18 @@ npm run web:build    # export ไป dist/ + ผูก manifest/service worker
 
 1. Apply [`supabase/migrations/20260831000000_items_sync.sql`](supabase/migrations/20260831000000_items_sync.sql)
    ใน Supabase SQL editor
-2. ตั้ง Email Template ให้ส่ง `{{ .Token }}` เป็น OTP 6 หลักตาม
+2. เปิด Email/Password provider และตั้ง Google/Facebook provider ตาม
    [`supabase/README.md`](supabase/README.md)
-3. ใส่ `EXPO_PUBLIC_SUPABASE_URL` และ `EXPO_PUBLIC_SUPABASE_ANON_KEY` ใน `.env`
+3. เพิ่ม `voicereminder://auth/callback` และ URL ของเว็บใน Supabase Redirect URLs
+4. ใส่ `EXPO_PUBLIC_SUPABASE_URL` และ `EXPO_PUBLIC_SUPABASE_ANON_KEY` ใน `.env`
 
-จากนั้นกด **CONNECT** ในแผง Cloud Memory แล้วใช้อีเมลเดียวกันบนทุกเครื่อง. ถ้าไม่ตั้ง Supabase
-หรือยังไม่ sign in แอปยังทำงานและเก็บข้อมูลในเครื่องเหมือนเดิมทุกอย่าง
+จากนั้นไปที่ Settings → Account & Sync เพื่อสมัครหรือเข้าสู่ระบบด้วย email/password, Google
+หรือ Facebook. ถ้าไม่ตั้ง Supabase หรือยังไม่ sign in แอปยังทำงานและเก็บข้อมูลในเครื่อง
+เหมือนเดิมทุกอย่าง
+
+ถ้าต้องการใช้ร่วมกับแฟน ให้ apply migration `20260831030000_shared_households.sql` แล้วเข้า
+Settings → พื้นที่ร่วมกัน: คนแรกสร้างพื้นที่และส่งรหัสเชิญ 8 ตัวให้อีกคนเข้าร่วม จากนั้นเลือก
+พื้นที่นั้นเป็นปลายทางของรายการใหม่ รายการจะซิงก์และแก้ไขร่วมกันได้ทั้งสองบัญชี
 
 ---
 
@@ -158,7 +169,7 @@ npm run web:build    # export ไป dist/ + ผูก manifest/service worker
 | **3. Query** | ถาม "วันนี้มีอะไรทำบ้าง" แล้วค้น+สรุปตอบด้วยเสียง | ✅ ทำแล้ว (พื้นฐาน) |
 | **4. Integrate budget** | intent `add_expense` → deep link เปิดหน้าเพิ่มรายการของ daily-budget แบบกรอกให้พร้อม | ✅ ทำแล้ว |
 | **5. Web / PWA** | Browser STT, web guards, installable/offline app shell | ✅ ทำแล้ว |
-| **6. Supabase sync** | email OTP + offline queue + LWW/soft delete + Realtime | ✅ โค้ดพร้อม (ต้อง apply migration) |
+| **6. Supabase sync** | email/password + Google/Facebook + offline queue + LWW/soft delete + Realtime | ✅ โค้ดพร้อม (ต้องตั้ง provider + apply migration) |
 
 รายละเอียดเชิงลึก (สัญญาของ speech layer, schema ของ intent/ข้อมูล, แผน integrate) อยู่ที่
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)

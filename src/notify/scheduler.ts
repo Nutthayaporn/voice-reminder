@@ -57,16 +57,16 @@ export async function scheduleForItem(item: Item): Promise<string[]> {
   const minute = item.all_day ? 0 : p.minute;
 
   const bodyByType: Record<string, string> = {
-    reminder: 'ถึงเวลาแล้ว ⏰',
-    todo: 'อย่าลืมทำ ☑️',
-    event: 'มีรายการวันนี้ 📅',
+    reminder: 'It is time ⏰',
+    todo: 'Do not forget ☑️',
+    event: 'Scheduled for today 📅',
   };
   const content: Notifications.NotificationContentInput = {
     title: item.title,
     body:
       item.alert_mode === 'alarm'
-        ? 'โหมดนาฬิกาปลุก · แตะเพื่อเปิดแอป'
-        : (bodyByType[item.type] ?? 'แจ้งเตือน'),
+        ? 'Alarm mode · Tap to open VORA'
+        : (bodyByType[item.type] ?? 'Reminder'),
     sound: item.alert_mode === 'alarm' && Platform.OS === 'ios' ? 'defaultRingtone' : 'default',
     interruptionLevel: item.alert_mode === 'alarm' ? 'timeSensitive' : 'active',
     priority:
@@ -105,7 +105,7 @@ export async function scheduleForItem(item: Item): Promise<string[]> {
         const id = await Notifications.scheduleNotificationAsync({
           content: {
             ...content,
-            body: `ยังไม่ได้ยืนยันว่าทำแล้ว · รอบ ${attempt}/${item.max_attempts}`,
+            body: `Not marked as done · Attempt ${attempt}/${item.max_attempts}`,
           },
           trigger: { type: SchedulableTriggerInputTypes.DATE, date, channelId },
         });

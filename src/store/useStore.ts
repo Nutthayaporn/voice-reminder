@@ -10,6 +10,7 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { signInWithSocialProvider, type SocialAuthProvider } from '../lib/auth';
 import { ensureNotifyPermission } from '../notify/setup';
 import { cancelNotifications, scheduleForItem } from '../notify/scheduler';
 import * as cloud from './cloud';
@@ -59,8 +60,14 @@ interface StoreState {
   updateItem: (id: string, patch: Partial<Item>) => void;
 
   bootstrapSync: () => Promise<void>;
-  requestOtp: (email: string) => Promise<{ error?: string }>;
-  verifyOtp: (email: string, token: string) => Promise<{ error?: string }>;
+  signInWithPassword: (email: string, password: string) => Promise<{ error?: string }>;
+  signUpWithPassword: (
+    email: string,
+    password: string,
+  ) => Promise<{ error?: string; needsEmailConfirmation?: boolean }>;
+  signInWithProvider: (
+    provider: SocialAuthProvider,
+  ) => Promise<{ error?: string; cancelled?: boolean }>;
   signOut: () => Promise<void>;
   syncNow: () => Promise<void>;
   flushPending: () => Promise<void>;
@@ -84,6 +91,7 @@ function normaliseItem(item: Item): Item {
   const remindUntilDone = item.remind_until_done ?? false;
   return {
     ...item,
+    household_id: item.household_id ?? null,
     alert_mode: remindUntilDone ? 'alarm' : (item.alert_mode ?? 'notification'),
     remind_until_done: remindUntilDone,
     snooze_minutes: snooze === 5 || snooze === 10 || snooze === 30 ? snooze : 10,
@@ -452,25 +460,33 @@ export const useStore = create<StoreState>()(
           }
         },
 
-        requestOtp: async (email) => {
-          if (!supabase) return { error: 'ยังไม่ได้ตั้งค่า Supabase' };
-          const { error } = await supabase.auth.signInWithOtp({
+        signInWithPassword: async (email, password) => {
+          if (!supabase) return { error: 'Supabase is not configured.' };
+          const { data, error } = await supabase.auth.signInWithPassword({
             email: email.trim(),
-            options: { shouldCreateUser: true },
-          });
-          return error ? { error: error.message } : {};
-        },
-
-        verifyOtp: async (email, token) => {
-          if (!supabase) return { error: 'ยังไม่ได้ตั้งค่า Supabase' };
-          const { data, error } = await supabase.auth.verifyOtp({
-            email: email.trim(),
-            token: token.trim(),
-            type: 'email',
+            password,
           });
           if (error) return { error: error.message };
           if (data.user) await enterCloud(data.user.id, data.user.email ?? null);
           return {};
+        },
+
+        signUpWithPassword: async (email, password) => {
+          if (!supabase) return { error: 'Supabase is not configured.' };
+          const { data, error } = await supabase.auth.signUp({
+            email: email.trim(),
+            password,
+          });
+          if (error) return { error: error.message };
+          if (data.session?.user) {
+            await enterCloud(data.session.user.id, data.session.user.email ?? null);
+            return {};
+          }
+          return { needsEmailConfirmation: true };
+        },
+
+        signInWithProvider: async (provider) => {
+          return signInWithSocialProvider(provider);
         },
 
         signOut: async () => {

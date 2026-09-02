@@ -66,7 +66,7 @@ export ANDROID_HOME="$SDK_PATH"
 export ANDROID_SDK_ROOT="$SDK_PATH"
 export PATH="$SDK_PATH/platform-tools:$PATH"
 
-echo "Building Voice Reminder Android APK ($BUILD_MODE)..."
+echo "Building VORA Android APK ($BUILD_MODE)..."
 echo "Android SDK: $SDK_PATH"
 
 (

@@ -111,17 +111,40 @@ store (ทับ speak_back เพราะเป็น data-driven), `record_ex
 - เทสต์: `node scripts/test-brain.mjs "เตือนกินยาพรุ่งนี้เช้า"` (ต้องถาม), เวลาที่ชัดจะไม่ถาม
 - ทางต่อยอด (ChatGPT แนะ): เรียนรู้ default ของผู้ใช้ (เช่น "เช้า"=08:00) แล้วเลิกถาม
 
+### 3e. Voice delete: inventory + bulk confirmation
+
+ทุกเทิร์น App แนบ inventory ปัจจุบัน (สูงสุด 200 รายการ) แยกจาก referents ของบทสนทนาก่อน
+เพื่อให้ “ลบนัดหมอ” ทำงานได้แม้ไม่ได้ถามรายการก่อน. `delete_item` ใช้กับรายการเดียวและต้องมี
+`target_ref`; `delete_items` ใช้ `delete_scope=past|done|all` และ App resolve IDs แบบ
+deterministic ผ่าน `src/store/delete.ts`. Bulk delete ไม่ execute ทันที: App จำ IDs ณ ตอนขอ
+และรอผู้ใช้พูด “ยืนยัน” หรือ “ยกเลิก”. รายการ recurring ไม่นับเป็น past และ all-day จะถือว่า
+หมดเวลาเมื่อจบวัน ไม่ใช่ตอน 00:00
+
 ## 4. Phase 2 — Data model + การเตือน
 
 > **สถานะ: ทำแล้ว (local-first + optional cloud sync)** — เก็บด้วย zustand + AsyncStorage ใน
 > `src/store/useStore.ts` (record = `Item` ใน `src/store/types.ts`), แปลงจาก intent
 > ด้วย `src/brain/toItem.ts`, ตั้งเตือนผ่าน router ใน `src/notify/` ซึ่งเลือก notification
 > หรือ native alarm ตาม `alert_mode`.
-> Cloud sync ใช้ optional Supabase client + email OTP, persisted offline write queue,
+> Cloud sync ใช้ optional Supabase client + email/password หรือ Google/Facebook OAuth,
+> persisted offline write queue,
 > soft delete, Realtime/foreground pull และ last-write-wins ด้วย `updated_at`. ดู
 > `src/store/cloud.ts`, `src/store/useStore.ts` และ `supabase/migrations/`. ถ้าไม่ตั้ง env หรือ
 > ไม่ sign in จะเป็น local-only เหมือนเดิม. **การเตือนจริงต้อง dev build**
 > (Expo Go จะ save ได้แต่ไม่ยิงเตือน)
+
+ค่า UI ที่เป็นพฤติกรรมเฉพาะเครื่อง (`preferredEngine`, `defaultAlertMode`,
+`activeHouseholdId`) แยกเก็บใน `src/store/usePreferences.ts`. ถ้า action reminder ไม่ได้ระบุ
+`alert_mode` ชัดเจน `actionToItem` จะใช้ default ของผู้ใช้; ถ้าพูดว่า “ปลุก” หรือ “แจ้งเตือน”
+ค่าที่สมองคืนมายังชนะ default เสมอ
+
+### 4b. Shared household
+
+Migration `20260831030000_shared_households.sql` เพิ่ม `households`, `household_members` และ
+`items.household_id`. รายการที่ `household_id=null` ยังเป็นส่วนตัว; รายการที่มี household จะอ่าน
+และแก้ไขได้โดยสมาชิกทุกคนผ่าน RLS. Invite code ใช้สำหรับ join เท่านั้นและทุก RPC ตรวจ
+`auth.uid()`. `items.id` เปลี่ยนเป็น conflict key เดี่ยวเพื่อให้สมาชิกคนอื่น upsert แถวที่ไม่ได้
+เป็นผู้สร้างได้ โดย `user_id` เดิมยังเก็บผู้สร้างรายการไว้
 
 ตัดสินใจใช้ **ตารางเดียว `items`** แยกชนิดด้วยคอลัมน์ `type` (ตามที่เจ้าของแอปเลือก —
 ไม่แยกตาราง holidays; วันหยุดก็คือ item ชนิดหนึ่ง). Schema จริงพร้อม RLS/LWW functions อยู่ที่
@@ -148,6 +171,8 @@ create table items (
 
 - ต่อ Supabase ด้วยแพตเทิร์นเดียวกับ daily-budget (`src/lib/supabase.ts` ที่ client เป็น
   `null` เมื่อยังไม่ตั้งค่า → แอปยัง demo ได้แบบ local)
+- `src/lib/auth.ts` เปิด social OAuth ผ่าน system browser; native กลับเข้ามาทาง
+  `voicereminder://auth/callback` ส่วน web กลับ URL เดิมและให้ Supabase อ่าน session จาก URL
 - แต่ละ reminder มี `alert_mode`: `notification` (ค่าเดิม/default) หรือ `alarm`
 - `remind_until_done=true` คือระดับที่สามใน UI (`UNTIL DONE`) และบังคับ `alert_mode=alarm`;
   ค่าปกติคือ Snooze 10 นาที รวมสูงสุด 5 รอบ
@@ -166,22 +191,69 @@ create table items (
 
 ## 5. Phase 4 — Integrate กับ daily-budget
 
-> **สถานะ: ทำแล้ว (แบบ deep link)** — `src/integrations/dailyBudget.ts`
+> **สถานะ: ทำแล้ว (REST bridge + deep-link fallback)** — `src/integrations/budgetApi.ts`
+> (REST) และ `src/integrations/dailyBudget.ts` (deep link, fallback)
 
-เมื่อพูด "ซื้อโจ๊ก 60 บาท" → intent `add_expense` (สมองดึง `amount` + `title` + วันที่ให้)
-→ ยิง **deep link** `dailybudget://entry?amount=60&note=โจ๊ก&date=YYYY-MM-DD&type=expense`
-เปิดหน้าเพิ่มรายการของ daily-budget แบบกรอกค่าให้พร้อม (หน้า `entry.tsx` ของมันรับ params
-เหล่านี้อยู่แล้ว) ผู้ใช้กดบันทึกยืนยัน
+เดิมทำเป็น **deep link** ทางเดียว (`dailybudget://entry?...`) ซึ่งบันทึกรายจ่ายได้แต่ *ตอบกลับ
+ไม่ได้* — ถามงบด้วยเสียงไม่ได้. เจ้าของแอปเลือกยกระดับเป็น **REST API** (จากตัวเลือก
+"rest api หรือ mcp") เพื่อให้ voice-reminder ทั้ง **ถามสถานะงบ + บันทึก + แก้ไข/ลบรายจ่าย**
+ได้ครบและตอบด้วยเสียงในแอปเดียว โดยไม่ต้องสลับแอป
 
-**ทำไมเลือก deep link (ไม่ใช่ insert เข้า DB ตรง):** daily-budget เป็น local-first และ
-Supabase ของมันมี RLS ผูก `auth.uid()` + `space_members` การ insert ตรงต้อง login เป็น user
-เดียวกัน + resolve space/category — หนักและบังคับตั้ง auth ข้ามแอป. deep link decouple กว่า
-ใช้ได้ทันทีบนเครื่องเดียว และให้ผู้ใช้ยืนยันการบันทึก (ปลอดภัยกับเรื่องเงิน)
+**ทำไม REST (ไม่ใช่ shared Supabase read):** สองแอปอยู่คนละ Supabase project (voice-reminder
+`rvkoza…`, daily-budget `zphzhc…`) → voice-reminder ออก JWT ที่ผ่าน RLS ของ daily-budget ไม่ได้.
+วิธีที่สะอาดคือ Edge Function บน project ของ daily-budget ที่ยืนยันตัวด้วย **shared token** แล้ว
+ใช้ service-role อ่าน/เขียน **หนึ่ง space** ที่ตั้งค่าไว้แทนเจ้าของ
 
-iOS ต้องมี `dailybudget` ใน `LSApplicationQueriesSchemes` (ตั้งใน app.json แล้ว) เพื่อให้
-`Linking.canOpenURL` ทำงาน. **อนาคต** ถ้าอยากให้บันทึกอัตโนมัติไม่ต้องกดยืนยัน: เพิ่ม route
-ใน daily-budget ที่ save ทันทีจาก deep link, หรือทำ Edge Function ให้ voice-reminder ยิง HTTP
-ตรง — เปลี่ยนแค่ transport ใน `sendExpenseToDailyBudget` โดยไม่แตะ caller
+**Edge Function:** `daily-budget/supabase/functions/budget-api/index.ts` — POST JSON `{action,…}`
+รองรับ `summary` (สรุปงบเดือน คำนวณด้วย port ของ `src/domain/analytics.ts`), `list`,
+`add_expense`, `update_expense`, `delete_expense`. Auth = `Authorization: Bearer <VOICE_API_TOKEN>`.
+Space resolve จาก secret `VOICE_API_SPACE_ID` หรือ `VOICE_API_OWNER_EMAIL`
+
+**ฝั่ง voice-reminder:** สมองเพิ่ม tool `query_budget` (มี `budget_kind`: today/remaining/status/
+summary), `update_expense`, `delete_expense`; `record_expense` เดิมตอนนี้ยิงเข้า API ก่อน (ถ้า
+ตั้งค่าไว้) ตกลงมาที่ deep link เมื่อ API ไม่พร้อม. App จำ `lastExpenseIdRef` ของรายจ่ายที่เพิ่ง
+บันทึก เพื่อให้ "แก้เมื่อกี้เป็น 45" / "ลบอันเมื่อกี้" (expense_ref="last") ทำงานได้; อ้างด้วยชื่อ/ยอด
+ก็จับคู่จาก `list` ได้ คำตอบทั้งหมดจัดรูปที่ `formatBudgetAnswer` (อังกฤษ ให้เข้าชุด speak_back)
+
+### 5b. Multi-user: OAuth 2.0 (Authorization Code + PKCE)
+
+> **สถานะ: ทำแล้ว** — daily-budget เป็น authorization server; voice-reminder เป็น OAuth client
+
+shared-token ด้านบนคือโหมด *ผู้ใช้คนเดียว* (fix space ด้วย secret). สำหรับ "ใครใช้ก็ได้ ต่างคน
+ต่างเชื่อมบัญชีตัวเอง" daily-budget ทำหน้าที่เป็น **OAuth 2.0 provider** เต็มรูปแบบ (grant =
+authorization code + PKCE S256, public client ไม่มี secret):
+
+- **Authorization endpoint = หน้า consent ในแอป** `daily-budget/app/connect.tsx` เปิดผ่าน deep link
+  `dailybudget://connect?client_id&redirect_uri&scope&state&code_challenge&…` ผู้ใช้ (ล็อกอินบัญชี
+  ตัวเองอยู่แล้ว) กด "อนุญาต" → RPC `oauth_issue_code()` (SECURITY DEFINER, รันเป็น `auth.uid()`)
+  ออก **authorization code** ผูกกับ user + space ที่ผู้ใช้เป็นเจ้าของ แล้ว redirect กลับ
+  `voicereminder://budget-oauth?code&state`
+- **Token endpoint** = Edge Function `oauth-token` แลก code (+ PKCE verifier) เป็น **access JWT**
+  (HS256 ด้วย `OAUTH_JWT_SECRET`, อายุ 1 ชม., claims: sub/space_id/scope) + **refresh token**
+  (opaque, เก็บเฉพาะ SHA-256 hash, rotate ทุกครั้งที่ refresh)
+- **Revocation** = Edge Function `oauth-revoke` (RFC 7009) + หน้า `app/connections.tsx` ให้ผู้ใช้ดู/
+  เพิกถอน "แอปที่เชื่อมต่อ" (ลบแถว `oauth_tokens` ผ่าน RLS owner-delete)
+- **Resource server** = `budget-api` ตรวจ access JWT (ลายเซ็น + exp + `scope`: read สำหรับ summary/
+  list, write สำหรับ add/update/delete) แล้วใช้ `space_id` จาก claims — ยังรับ shared token เดิมเป็น
+  legacy fallback
+- schema: `oauth_clients` / `oauth_authorization_codes` / `oauth_tokens` +
+  migration `20260902000000_oauth_provider.sql`
+- **ฝั่ง voice-reminder:** `src/integrations/budgetOAuth.ts` (PKCE + expo-crypto, เก็บ token ใน
+  AsyncStorage, auto-refresh), ปุ่ม "Connect Daily Budget" ในหน้า Settings, และ `budgetApi.ts`
+  แนบ access token อัตโนมัติ (getAccessToken → refresh) แทน shared token
+
+**ทำไมไม่สร้าง OAuth server จากศูนย์แบบมี /authorize เป็นเว็บ + JWKS:** Supabase Auth ไม่ใช่ OAuth
+provider จึงต้องเขียน authorization server เอง เราเลือกทำ authorize เป็น *หน้า consent ในแอป* (reuse
+login เดิม) + token/refresh/revoke เป็น Edge Functions ซึ่งคือ authorization-code grant ครบสมบูรณ์
+สำหรับ mobile first-party. ใช้ HS256 + shared secret (resource server กับ auth server เป็นเจ้าของ
+เดียวกัน); ถ้าอนาคตมี third-party resource server ค่อยสลับเป็น RS256 + JWKS
+
+**ข้อกำหนด/ปลอดภัย:** ต้องเปิด cloud sync + login ใน daily-budget (ไม่งั้นไม่มีข้อมูลใน Supabase ให้
+อ่าน). `OAUTH_JWT_SECRET` ตั้งเป็น Edge Function secret ระดับ project (ใช้ร่วม oauth-token +
+budget-api). access token อายุสั้น + refresh rotate + เพิกถอนได้ ทำให้ปลอดภัยกว่า shared token แบบ
+ฝังใน bundle. **อนาคต** ห่อ budget-api เป็น MCP tool ให้ agent เรียกได้ก็ได้โดยไม่แตะ logic
+
+iOS ยังมี `dailybudget` ใน `LSApplicationQueriesSchemes` (app.json) ไว้สำหรับ deep-link fallback
 
 ## 6. ค่าใช้จ่าย / provider ที่เลือก
 

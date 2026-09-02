@@ -63,7 +63,7 @@ if (!html.includes('rel="manifest"')) {
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="V.O.R.A." />
+    <meta name="apple-mobile-web-app-title" content="VORA" />
     <script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){})})}</script>
   `;
   html = html.replace('</head>', `${tags}</head>`);

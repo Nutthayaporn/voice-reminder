@@ -49,7 +49,7 @@ class AlarmActivity : Activity() {
       setPadding(0, (28 * density).toInt(), 0, (40 * density).toInt())
     })
     root.addView(TextView(this).apply {
-      text = "รอบ ${payload.snoozeCount + 1}/${payload.maxAttempts}"
+      text = "Attempt ${payload.snoozeCount + 1}/${payload.maxAttempts}"
       setTextColor(Color.LTGRAY)
       textSize = 14f
       gravity = Gravity.CENTER
@@ -57,14 +57,14 @@ class AlarmActivity : Activity() {
     })
     if (payload.snoozeCount + 1 < payload.maxAttempts) {
       root.addView(Button(this).apply {
-        text = "เลื่อนปลุก ${payload.snoozeMinutes} นาที"
+        text = "Snooze ${payload.snoozeMinutes} min"
         setOnClickListener {
           if (VoiceAlarmScheduler.scheduleSnooze(this@AlarmActivity, payload)) stopAndFinish()
         }
       })
     }
     root.addView(Button(this).apply {
-      text = if (payload.remindUntilDone) "ทำแล้ว" else "หยุด"
+      text = if (payload.remindUntilDone) "Done" else "Stop"
       setOnClickListener {
         if (payload.remindUntilDone) VoiceAlarmScheduler.markDone(this@AlarmActivity, payload)
         stopAndFinish()

@@ -97,7 +97,7 @@ export function useVoiceInput({ engine, onResult, onError }: UseVoiceInputArgs) 
   // ---- cloud engine (record → Groq) -------------------------------------
   const startCloud = useCallback(async () => {
     const perm = await requestRecordingPermissionsAsync();
-    if (!perm.granted) return fail('ไม่ได้รับอนุญาตให้ใช้ไมโครโฟน');
+    if (!perm.granted) return fail('Microphone access was not granted.');
     await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
     await recorder.prepareToRecordAsync();
     recorder.record();
@@ -110,7 +110,7 @@ export function useVoiceInput({ engine, onResult, onError }: UseVoiceInputArgs) 
     setStatus('transcribing');
     await recorder.stop();
     const uri = recorder.uri;
-    if (!uri) return fail('ไม่พบไฟล์เสียงที่อัดไว้');
+    if (!uri) return fail('The recorded audio file could not be found.');
     try {
       const text = await transcribeWithGroq(uri);
       finish(text, 'cloud');
@@ -122,7 +122,7 @@ export function useVoiceInput({ engine, onResult, onError }: UseVoiceInputArgs) 
   // ---- device engine ----------------------------------------------------
   const startDevice = useCallback(async () => {
     const granted = await ensureDeviceSttPermission();
-    if (!granted) return fail('ไม่ได้รับอนุญาตให้ใช้ speech recognition');
+    if (!granted) return fail('Speech recognition access was not granted.');
     deviceTextRef.current = '';
     setPartial('');
     startedAtRef.current = Date.now();
@@ -162,7 +162,7 @@ export function useVoiceInput({ engine, onResult, onError }: UseVoiceInputArgs) 
       },
     });
 
-    if (!session) return fail('เบราว์เซอร์นี้ไม่รองรับ Web Speech API');
+    if (!session) return fail('This browser does not support Web Speech API.');
 
     webSessionRef.current = session;
     listeningRef.current = true;

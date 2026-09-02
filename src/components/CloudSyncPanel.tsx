@@ -8,14 +8,14 @@ import {
   View,
 } from 'react-native';
 
-import { colors, font, spacing } from '../theme';
+import { colors, font, radius, spacing } from '../theme';
 import { isSupabaseConfigured, useStore } from '../store/useStore';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function formatSyncTime(value: string | null): string {
-  if (!value) return 'ยังไม่เคยซิงก์';
-  return new Intl.DateTimeFormat('th-TH', {
+  if (!value) return 'Never synced';
+  return new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Asia/Bangkok',
     day: 'numeric',
     month: 'short',
@@ -27,6 +27,7 @@ function formatSyncTime(value: string | null): string {
 export function CloudSyncPanel() {
   const configured = isSupabaseConfigured();
   const syncMode = useStore((state) => state.syncMode);
+  const userId = useStore((state) => state.userId);
   const userEmail = useStore((state) => state.userEmail);
   const syncing = useStore((state) => state.syncing);
   const syncError = useStore((state) => state.syncError);
@@ -34,58 +35,68 @@ export function CloudSyncPanel() {
   const pendingCount = useStore((state) =>
     state.pendingOps.filter((op) => op.userId === state.userId).length,
   );
-  const requestOtp = useStore((state) => state.requestOtp);
-  const verifyOtp = useStore((state) => state.verifyOtp);
+  const signInWithPassword = useStore((state) => state.signInWithPassword);
+  const signUpWithPassword = useStore((state) => state.signUpWithPassword);
+  const signInWithProvider = useStore((state) => state.signInWithProvider);
   const signOut = useStore((state) => state.signOut);
   const syncNow = useStore((state) => state.syncNow);
   const clearSyncError = useStore((state) => state.clearSyncError);
 
   const [expanded, setExpanded] = useState(false);
+  const [mode, setMode] = useState<'signIn' | 'signUp'>('signIn');
   const [email, setEmail] = useState('');
-  const [token, setToken] = useState('');
-  const [codeSent, setCodeSent] = useState(false);
+  const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  const sendCode = async () => {
+  const submitEmail = async () => {
     const cleanEmail = email.trim().toLowerCase();
     if (!EMAIL_PATTERN.test(cleanEmail)) {
-      setMessage('กรุณาใส่อีเมลให้ถูกต้อง');
+      setMessage('Enter a valid email address.');
+      return;
+    }
+    if (password.length < 6) {
+      setMessage('Password must be at least six characters.');
       return;
     }
 
     setBusy(true);
     setMessage(null);
     clearSyncError();
-    const result = await requestOtp(cleanEmail);
+    const result = await (mode === 'signIn'
+      ? signInWithPassword(cleanEmail, password)
+      : signUpWithPassword(cleanEmail, password)
+    ).catch((error: unknown) => ({
+      error: error instanceof Error ? error.message : String(error),
+    }));
     setBusy(false);
     if (result.error) {
       setMessage(result.error);
       return;
     }
     setEmail(cleanEmail);
-    setCodeSent(true);
-    setMessage('ส่งรหัส 6 หลักแล้ว กรุณาตรวจอีเมล');
-  };
-
-  const confirmCode = async () => {
-    if (!/^\d{6}$/.test(token.trim())) {
-      setMessage('กรุณาใส่รหัส 6 หลัก');
+    setPassword('');
+    if ('needsEmailConfirmation' in result && result.needsEmailConfirmation) {
+      setMessage('Account created. Check your email to confirm it, then sign in.');
+      setMode('signIn');
       return;
     }
+    setExpanded(false);
+  };
 
+  const submitProvider = async (provider: 'google' | 'facebook') => {
     setBusy(true);
     setMessage(null);
     clearSyncError();
-    const result = await verifyOtp(email, token);
+    const result = await signInWithProvider(provider).catch((error: unknown) => ({
+      error: error instanceof Error ? error.message : String(error),
+    }));
     setBusy(false);
     if (result.error) {
       setMessage(result.error);
       return;
     }
-    setToken('');
-    setCodeSent(false);
-    setExpanded(false);
+    if (!('cancelled' in result) || !result.cancelled) setExpanded(false);
   };
 
   if (!configured) {
@@ -93,23 +104,25 @@ export function CloudSyncPanel() {
       <View style={styles.panel}>
         <PanelHeading status="LOCAL ONLY" />
         <Text style={styles.muted}>
-          ยังไม่ได้ตั้งค่า Supabase · ข้อมูลยังเก็บในเครื่องและใช้ออฟไลน์ได้ครบ
+          Supabase is not configured. Your data stays on this device and remains available offline.
         </Text>
       </View>
     );
   }
 
-  if (syncMode === 'cloud' && userEmail) {
+  if (syncMode === 'cloud' && userId) {
     return (
       <View style={styles.panel}>
         <PanelHeading status={syncing ? 'SYNCING' : pendingCount ? 'PENDING' : 'CONNECTED'} />
         <View style={styles.accountRow}>
           <View style={styles.accountCopy}>
-            <Text style={styles.accountEmail} numberOfLines={1}>{userEmail}</Text>
+            <Text style={styles.accountEmail} numberOfLines={1}>
+              {userEmail || 'Signed-in account'}
+            </Text>
             <Text style={styles.muted}>
               {syncing
-                ? 'กำลังซิงก์ข้อมูล...'
-                : `${formatSyncTime(lastSyncedAt)}${pendingCount ? ` · รอส่ง ${pendingCount}` : ''}`}
+                ? 'Syncing data...'
+                : `${formatSyncTime(lastSyncedAt)}${pendingCount ? ` · ${pendingCount} pending` : ''}`}
             </Text>
           </View>
           {syncing && <ActivityIndicator color={colors.primary} size="small" />}
@@ -135,54 +148,72 @@ export function CloudSyncPanel() {
       {!expanded ? (
         <View style={styles.accountRow}>
           <Text style={[styles.muted, styles.accountCopy]}>
-            เข้าสู่ระบบเพื่อสำรองและซิงก์รายการข้ามเครื่อง
+            Sign in to back up and sync your items across devices.
           </Text>
-          <ActionButton label="CONNECT" onPress={() => setExpanded(true)} />
+          <ActionButton label="SIGN IN" onPress={() => setExpanded(true)} />
         </View>
       ) : (
         <View style={styles.form}>
+          <View style={styles.modeRow}>
+            <ModeButton
+              active={mode === 'signIn'}
+              label="SIGN IN"
+              onPress={() => {
+                setMode('signIn');
+                setMessage(null);
+              }}
+            />
+            <ModeButton
+              active={mode === 'signUp'}
+              label="CREATE ACCOUNT"
+              onPress={() => {
+                setMode('signUp');
+                setMessage(null);
+              }}
+            />
+          </View>
+
           <TextInput
-            accessibilityLabel="อีเมลสำหรับ Cloud Sync"
+            accessibilityLabel="Email for cloud sync"
             autoCapitalize="none"
             autoComplete="email"
-            editable={!busy && !codeSent}
+            editable={!busy}
             keyboardType="email-address"
             onChangeText={setEmail}
-            onSubmitEditing={() => void sendCode()}
             placeholder="you@example.com"
             placeholderTextColor={colors.textFaint}
-            returnKeyType="send"
+            returnKeyType="next"
             style={styles.input}
             value={email}
           />
 
-          {codeSent && (
-            <TextInput
-              accessibilityLabel="รหัส OTP 6 หลัก"
-              autoComplete="one-time-code"
-              keyboardType="number-pad"
-              maxLength={6}
-              onChangeText={(value) => setToken(value.replace(/\D/g, ''))}
-              onSubmitEditing={() => void confirmCode()}
-              placeholder="รหัส 6 หลัก"
-              placeholderTextColor={colors.textFaint}
-              returnKeyType="done"
-              style={[styles.input, styles.codeInput]}
-              value={token}
-            />
-          )}
+          <TextInput
+            accessibilityLabel="Password"
+            autoCapitalize="none"
+            autoComplete={mode === 'signUp' ? 'new-password' : 'current-password'}
+            editable={!busy}
+            onChangeText={setPassword}
+            onSubmitEditing={() => void submitEmail()}
+            placeholder="Password (6+ characters)"
+            placeholderTextColor={colors.textFaint}
+            returnKeyType="done"
+            secureTextEntry
+            style={styles.input}
+            value={password}
+          />
 
           {(message || syncError) && (
-            <Text style={message?.startsWith('ส่งรหัส') ? styles.success : styles.error}>
+            <Text style={message?.startsWith('Account created') ? styles.success : styles.error}>
               {message || syncError}
             </Text>
           )}
 
           <View style={styles.actionRow}>
             <ActionButton
-              label={busy ? 'PLEASE WAIT' : codeSent ? 'VERIFY OTP' : 'SEND OTP'}
+              label={busy ? 'PLEASE WAIT' : mode === 'signIn' ? 'SIGN IN' : 'SIGN UP'}
               disabled={busy}
-              onPress={() => void (codeSent ? confirmCode() : sendCode())}
+              grow
+              onPress={() => void submitEmail()}
             />
             <ActionButton
               label="CANCEL"
@@ -190,10 +221,30 @@ export function CloudSyncPanel() {
               disabled={busy}
               onPress={() => {
                 setExpanded(false);
-                setCodeSent(false);
-                setToken('');
+                setPassword('');
                 setMessage(null);
               }}
+            />
+          </View>
+
+          <View style={styles.dividerRow}>
+            <View style={styles.divider} />
+            <Text style={styles.dividerText}>OR CONTINUE WITH</Text>
+            <View style={styles.divider} />
+          </View>
+
+          <View style={styles.socialRow}>
+            <ActionButton
+              label="GOOGLE"
+              disabled={busy}
+              grow
+              onPress={() => void submitProvider('google')}
+            />
+            <ActionButton
+              label="FACEBOOK"
+              disabled={busy}
+              grow
+              onPress={() => void submitProvider('facebook')}
             />
           </View>
         </View>
@@ -206,7 +257,7 @@ function PanelHeading({ status }: { status: string }) {
   const active = status === 'CONNECTED';
   return (
     <View style={styles.heading}>
-      <Text style={styles.label}>CLOUD MEMORY</Text>
+      <Text style={styles.label}>ACCOUNT & SYNC</Text>
       <View style={styles.statusRow}>
         <View style={[styles.statusDot, active && styles.statusDotActive]} />
         <Text style={[styles.status, active && styles.statusActive]}>{status}</Text>
@@ -220,11 +271,13 @@ function ActionButton({
   onPress,
   disabled = false,
   subtle = false,
+  grow = false,
 }: {
   label: string;
   onPress: () => void;
   disabled?: boolean;
   subtle?: boolean;
+  grow?: boolean;
 }) {
   return (
     <Pressable
@@ -234,6 +287,7 @@ function ActionButton({
       style={({ pressed }) => [
         styles.button,
         subtle && styles.buttonSubtle,
+        grow && styles.buttonGrow,
         disabled && styles.buttonDisabled,
         pressed && styles.buttonPressed,
       ]}
@@ -243,13 +297,35 @@ function ActionButton({
   );
 }
 
+function ModeButton({
+  active,
+  label,
+  onPress,
+}: {
+  active: boolean;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="tab"
+      accessibilityState={{ selected: active }}
+      onPress={onPress}
+      style={[styles.modeButton, active && styles.modeButtonActive]}
+    >
+      <Text style={[styles.modeButtonText, active && styles.modeButtonTextActive]}>{label}</Text>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   panel: {
-    backgroundColor: 'rgba(5, 19, 27, 0.88)',
+    backgroundColor: colors.card,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: spacing.md,
-    gap: spacing.sm,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+    gap: spacing.md,
   },
   heading: {
     flexDirection: 'row',
@@ -273,6 +349,11 @@ const styles = StyleSheet.create({
   accountEmail: { color: colors.text, fontSize: font.sm, fontWeight: '700' },
   muted: { color: colors.textMute, fontSize: font.xs, lineHeight: 18 },
   form: { gap: spacing.sm },
+  modeRow: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: colors.border },
+  modeButton: { flex: 1, alignItems: 'center', paddingVertical: spacing.sm },
+  modeButtonActive: { borderBottomWidth: 2, borderBottomColor: colors.primary },
+  modeButtonText: { color: colors.textMute, fontSize: 8, fontWeight: '800', letterSpacing: 1 },
+  modeButtonTextActive: { color: colors.primaryBright },
   input: {
     color: colors.text,
     backgroundColor: 'rgba(2, 12, 18, 0.85)',
@@ -282,8 +363,11 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     fontSize: font.sm,
   },
-  codeInput: { letterSpacing: 6, fontWeight: '800' },
   actionRow: { flexDirection: 'row', gap: spacing.sm },
+  socialRow: { flexDirection: 'row', gap: spacing.sm },
+  dividerRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  divider: { flex: 1, height: 1, backgroundColor: colors.border },
+  dividerText: { color: colors.textFaint, fontSize: 7, fontWeight: '700', letterSpacing: 1 },
   button: {
     minHeight: 34,
     alignItems: 'center',
@@ -294,6 +378,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primarySoft,
   },
   buttonSubtle: { borderColor: colors.border, backgroundColor: 'transparent' },
+  buttonGrow: { flex: 1 },
   buttonDisabled: { opacity: 0.45 },
   buttonPressed: { opacity: 0.7 },
   buttonText: { color: colors.primaryBright, fontSize: 8, fontWeight: '800', letterSpacing: 1 },

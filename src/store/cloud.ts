@@ -8,6 +8,7 @@ import type { Item, ItemType } from './types';
 export interface CloudItemRow {
   id: string;
   user_id: string;
+  household_id: string | null;
   type: ItemType;
   title: string;
   body: string | null;
@@ -35,6 +36,7 @@ function must() {
 export function rowToItem(row: CloudItemRow): Item {
   return {
     id: row.id,
+    household_id: row.household_id ?? null,
     type: row.type,
     title: row.title,
     body: row.body,
@@ -56,11 +58,10 @@ export function rowToItem(row: CloudItemRow): Item {
   };
 }
 
-export async function fetchCloudItems(userId: string): Promise<CloudItemRow[]> {
+export async function fetchCloudItems(_userId: string): Promise<CloudItemRow[]> {
   const { data, error } = await must()
     .from('items')
     .select('*')
-    .eq('user_id', userId)
     .order('updated_at', { ascending: true });
   if (error) throw error;
   return (data ?? []) as CloudItemRow[];
@@ -68,8 +69,10 @@ export async function fetchCloudItems(userId: string): Promise<CloudItemRow[]> {
 
 /** Conditional upsert enforced in SQL: an older offline edit cannot replace a newer row. */
 export async function upsertCloudItem(item: Item): Promise<void> {
-  const { error } = await must().rpc('upsert_item_lww', {
+  const client = must();
+  const { error } = await client.rpc('upsert_item_lww', {
     p_id: item.id,
+    p_household_id: item.household_id ?? null,
     p_type: item.type,
     p_title: item.title,
     p_body: item.body,
@@ -87,7 +90,34 @@ export async function upsertCloudItem(item: Item): Promise<void> {
     p_created_at: item.created_at,
     p_updated_at: item.updated_at,
   });
-  if (error) throw error;
+  if (!error) return;
+
+  // Keep personal sync working during the short deployment window before the
+  // shared-households migration is applied. Shared items require the new RPC.
+  if (error.code === 'PGRST202' && !item.household_id) {
+    const { error: legacyError } = await client.rpc('upsert_item_lww', {
+      p_id: item.id,
+      p_type: item.type,
+      p_title: item.title,
+      p_body: item.body,
+      p_start_at: item.start_at,
+      p_end_at: item.end_at,
+      p_all_day: item.all_day,
+      p_recurrence: item.recurrence,
+      p_alert_mode: item.alert_mode,
+      p_remind_until_done: item.remind_until_done,
+      p_snooze_minutes: item.snooze_minutes,
+      p_max_attempts: item.max_attempts,
+      p_people: item.people ?? null,
+      p_raw_text: item.raw_text ?? null,
+      p_done: item.done,
+      p_created_at: item.created_at,
+      p_updated_at: item.updated_at,
+    });
+    if (!legacyError) return;
+    throw legacyError;
+  }
+  throw error;
 }
 
 /** Soft delete with the same LWW guard used by upserts. */
@@ -105,7 +135,7 @@ export function subscribeCloudItems(userId: string, onChange: () => void): () =>
     .channel(`voice-reminder:items:${userId}`)
     .on(
       'postgres_changes',
-      { event: '*', schema: 'public', table: 'items', filter: `user_id=eq.${userId}` },
+      { event: '*', schema: 'public', table: 'items' },
       onChange,
     )
     .subscribe();

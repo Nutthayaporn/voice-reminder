@@ -25,7 +25,7 @@ const ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions';
  */
 export async function transcribeWithGroq(uri: string): Promise<string> {
   if (!config.groqApiKey) {
-    throw new Error('ยังไม่ได้ตั้งค่า Groq API key (EXPO_PUBLIC_GROQ_API_KEY)');
+    throw new Error('Groq API key is not configured (EXPO_PUBLIC_GROQ_API_KEY).');
   }
 
   const res = await uploadAsync(ENDPOINT, uri, {
@@ -45,7 +45,7 @@ export async function transcribeWithGroq(uri: string): Promise<string> {
   });
 
   if (res.status < 200 || res.status >= 300) {
-    throw new Error(`Groq STT ล้มเหลว (${res.status}) ${res.body ?? ''}`.trim());
+    throw new Error(`Groq STT failed (${res.status}) ${res.body ?? ''}`.trim());
   }
 
   const data = JSON.parse(res.body || '{}') as { text?: string };

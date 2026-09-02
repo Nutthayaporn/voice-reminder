@@ -26,13 +26,13 @@ export async function initNotifications(): Promise<void> {
 
     if (Platform.OS === 'android') {
       await Notifications.setNotificationChannelAsync('default', {
-        name: 'การเตือน',
+        name: 'Reminders',
         importance: Notifications.AndroidImportance.HIGH,
         sound: 'default',
       });
       await Notifications.setNotificationChannelAsync('alarm-fallback', {
-        name: 'นาฬิกาปลุก (โหมดสำรอง)',
-        description: 'ใช้เมื่ออุปกรณ์ไม่รองรับระบบนาฬิกาปลุกแบบ native',
+        name: 'Alarm fallback',
+        description: 'Used when native alarm support is unavailable.',
         importance: Notifications.AndroidImportance.MAX,
         sound: 'default',
         enableVibrate: true,
