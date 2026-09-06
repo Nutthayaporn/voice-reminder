@@ -40,7 +40,7 @@
 ## สถาปัตยกรรม
 
 ```
-🎙️ แตะปุ่ม → อัดเสียง / ฟัง
+🎙️ Hands-free (หรือแตะปุ่ม) → อัดเสียง / ฟัง
         │
         ▼
 ┌──────────────────────────┐   สลับได้ที่ UI (src/speech/engines.ts)
@@ -68,7 +68,7 @@
 | --- | --- |
 | `App.tsx` | navigation พูด/รายการ/ตั้งค่า + ปุ่มไมค์ + แสดงผล + พูดกลับ |
 | `src/speech/types.ts` | **สัญญากลาง** ของ speech (engine id, status, ผลลัพธ์) |
-| `src/speech/useVoiceInput.ts` | หัวใจ push-to-talk — คุมการอัด/ฟังแล้วส่ง transcript ออกทาง `onResult` |
+| `src/speech/useVoiceInput.ts` | คุมการอัด/ฟัง, auto-stop หลังเงียบ 2–3 วินาที แล้วส่ง transcript ทาง `onResult` |
 | `src/speech/cloudGroq.ts` | STT ฝั่ง cloud — อัพโหลดเสียงไป Groq Whisper |
 | `src/speech/deviceStt.ts` | STT ในเครื่อง (expo-speech-recognition) + เช็คว่ารันได้ไหม |
 | `src/speech/webStt.ts` | STT บน browser ผ่าน Web Speech API + live partial |
@@ -112,6 +112,15 @@ npx expo start
 สแกน QR ด้วยแอป **Expo Go** บนมือถือ → เลือก engine **Cloud** → แตะไมค์แล้วพูด
 (ฝั่ง cloud ใช้แค่การอัดเสียง + เรียก API จึงทำงานใน Expo Go ได้เลย)
 
+เมื่อเปิดแอปใหม่ VORA จะขอสิทธิ์ไมค์ (ถ้ายังไม่ได้อนุญาต), ทักสั้น ๆ หนึ่งครั้ง แล้วเปิดไมค์
+ให้พูดได้ทันที. ระหว่าง app session เดียวกัน หากสลับแท็บหรือกลับเข้า **Talk** จะเปิดไมค์ให้พูด
+ได้เลยโดยไม่ทักซ้ำ; เมื่อปิดแล้วเปิดแอปใหม่จึงทักใหม่. เมื่อเงียบประมาณ 1.2 วินาทีระบบจะถือว่าพูดจบ;
+เมื่อ Hands-free เป็น OFF หลัง AI ตอบจะไม่เปิดไมค์ซ้ำ หากต้องการสั่งต่อให้แตะ **Tap to Talk**. นี่เป็น one-shot
+ของหน้า Talk และไม่เกี่ยวกับ config Hands-free. **Hands-free** เป็น config แยก
+(ค่าเริ่มต้น OFF) สำหรับเปิดไมค์ต่อหลัง AI ตอบ; เปิดปิดได้จากปุ่มใต้ไมค์หรือ Settings.
+ตั้ง **Stop after silence** เป็น OFF ได้หากต้องการให้ทั้ง Tap-to-talk และ Hands-free ฟังต่อ
+จนกว่าจะแตะ Stop เอง (ค่าเริ่มต้นเป็น ON).
+
 ### รันแบบ on-device engine (ต้อง dev build)
 `expo-speech-recognition` เป็น native module ที่ **ไม่มีใน Expo Go** ต้อง build เอง:
 ```bash
@@ -153,9 +162,16 @@ npm run web:build    # export ไป dist/ + ผูก manifest/service worker
 หรือ Facebook. ถ้าไม่ตั้ง Supabase หรือยังไม่ sign in แอปยังทำงานและเก็บข้อมูลในเครื่อง
 เหมือนเดิมทุกอย่าง
 
-ถ้าต้องการใช้ร่วมกับแฟน ให้ apply migration `20260831030000_shared_households.sql` แล้วเข้า
-Settings → พื้นที่ร่วมกัน: คนแรกสร้างพื้นที่และส่งรหัสเชิญ 8 ตัวให้อีกคนเข้าร่วม จากนั้นเลือก
-พื้นที่นั้นเป็นปลายทางของรายการใหม่ รายการจะซิงก์และแก้ไขร่วมกันได้ทั้งสองบัญชี
+ถ้าต้องการใช้ร่วมกับแฟน ให้ apply migrations `20260831030000_shared_households.sql` และ
+`20260906000000_household_invite_links.sql` แล้วเข้า Settings → Sharing: คนแรกสร้างพื้นที่
+แล้วกดปุ่ม Share ข้างชื่อพื้นที่เพื่อส่ง invite link ผ่าน LINE/Messages. ผู้รับแตะลิงก์ ล็อกอิน
+(ถ้ายังไม่ได้ล็อกอิน) ตรวจชื่อพื้นที่ แล้วกด Join ครั้งเดียว; รหัสเชิญ 8 ตัวยังใช้กรอกเองเป็น
+fallback ได้ จากนั้นเลือกพื้นที่นั้นเป็นปลายทางของรายการใหม่ รายการจะซิงก์และแก้ไขร่วมกันได้
+ทั้งสองบัญชี
+
+ระหว่างพัฒนา native build จะ share `voicereminder://` (Expo Go ใช้ development URL) ส่วนเว็บ
+จะ share origin ปัจจุบัน เมื่อมี public PWA domain ให้ตั้ง `EXPO_PUBLIC_INVITE_BASE_URL` เพื่อให้
+ทุกแพลตฟอร์มส่ง HTTPS invite URL เดียวกัน
 
 ---
 

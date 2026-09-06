@@ -72,6 +72,7 @@ export function isWebSttAvailable(): boolean {
 export function createWebStt(
   locale: string,
   callbacks: WebSttCallbacks,
+  continuous = false,
 ): WebSttSession | null {
   const Recognition = getConstructor();
   if (!Recognition) return null;
@@ -82,7 +83,7 @@ export function createWebStt(
 
   recognition.lang = locale;
   recognition.interimResults = true;
-  recognition.continuous = false;
+  recognition.continuous = continuous;
 
   recognition.onresult = (event) => {
     const finalParts: string[] = [];

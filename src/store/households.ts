@@ -8,6 +8,11 @@ export interface Household {
   created_at: string;
 }
 
+export interface HouseholdInvitePreview {
+  name: string;
+  already_member: boolean;
+}
+
 function must() {
   if (!supabase) throw new Error('Supabase is not configured');
   return supabase;
@@ -35,4 +40,16 @@ export async function joinHousehold(inviteCode: string): Promise<Household> {
   const row = Array.isArray(data) ? data[0] : data;
   if (!row) throw new Error('Invite code not found.');
   return row as Household;
+}
+
+export async function previewHouseholdInvite(
+  inviteCode: string,
+): Promise<HouseholdInvitePreview> {
+  const { data, error } = await must().rpc('preview_household_invite', {
+    p_invite_code: inviteCode.trim().toUpperCase(),
+  });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) throw new Error('Invite code not found.');
+  return row as HouseholdInvitePreview;
 }

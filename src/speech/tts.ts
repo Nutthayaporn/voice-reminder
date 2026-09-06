@@ -10,6 +10,7 @@ import { prepareTextForSpeech, speechLanguageFor } from './speechText';
 export interface SpeakOptions {
   language?: string;
   onDone?: () => void;
+  onStopped?: () => void;
   onError?: (message: string) => void;
 }
 
@@ -25,7 +26,7 @@ export function speak(text: string, opts: SpeakOptions = {}): void {
     rate: 1.0,
     pitch: 1.0,
     onDone: opts.onDone,
-    onStopped: opts.onDone,
+    onStopped: opts.onStopped,
     onError: (e) => opts.onError?.(String(e)),
   });
 }

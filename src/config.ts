@@ -41,6 +41,15 @@ export const config = {
     providerScheme: 'dailybudget',
     scopes: 'budget.read budget.write',
   },
+
+  /**
+   * Optional public HTTPS URL used in shared-space invitations. Until a
+   * production domain is configured, native builds use the app's
+   * `voicereminder://` scheme and web uses its current origin.
+   */
+  sharing: {
+    inviteBaseUrl: (process.env.EXPO_PUBLIC_INVITE_BASE_URL ?? '').replace(/\/+$/, ''),
+  },
 } as const;
 
 export function isGroqConfigured(): boolean {

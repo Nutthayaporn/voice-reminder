@@ -9,7 +9,8 @@ To enable account sync:
    `20260831020000_reminder_persistence.sql` for Snooze/Until Done. The latest migration
    is self-contained and can also be rerun directly on older installs that do not yet have
    `alert_mode`. Apply `20260831030000_shared_households.sql` to enable shared spaces and
-   invite codes.
+   invite codes. Apply `20260906000000_household_invite_links.sql` as well so invite links can
+   preview the shared-space name before the recipient confirms joining.
 2. In **Authentication → Providers → Email**, keep email sign-in enabled. The app uses
    email/password signup and signin. If **Confirm email** is enabled, a new user must click the
    confirmation email before signing in; if it is disabled, signup creates a session immediately.
@@ -50,8 +51,8 @@ automatically.
 
 ## Shared spaces
 
-After the shared-households migration is applied, sign in on both devices. One person creates
-a shared space in Settings and sends the displayed eight-character invite code to the other
-person. The other person joins with that code. Selecting the space makes newly spoken reminders,
-events, todos, and notes visible and editable by both members; selecting “เฉพาะฉัน” keeps new
-items private.
+After the shared-space migrations are applied, sign in on both devices. One person creates a
+shared space in Settings and taps the share icon beside it. The other person opens the invite
+link, confirms the displayed space, and joins; the eight-character code remains available as a
+manual fallback. Selecting the space makes newly spoken reminders, events, todos, and notes
+visible and editable by both members; selecting “Only me” keeps new items private.

@@ -4,18 +4,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_NAME="$(basename "$PROJECT_ROOT")"
 BUILD_MODE="${1:-release}"
 
 case "$BUILD_MODE" in
   release)
     GRADLE_TASK="assembleRelease"
     APK_SOURCE="$PROJECT_ROOT/android/app/build/outputs/apk/release/app-release.apk"
-    APK_NAME="voice-reminder-release.apk"
+    APK_NAME="$PROJECT_NAME-release.apk"
     ;;
   debug)
     GRADLE_TASK="assembleDebug"
     APK_SOURCE="$PROJECT_ROOT/android/app/build/outputs/apk/debug/app-debug.apk"
-    APK_NAME="voice-reminder-debug.apk"
+    APK_NAME="$PROJECT_NAME-debug.apk"
     ;;
   *)
     echo "Usage: $0 [release|debug]" >&2
@@ -66,7 +67,7 @@ export ANDROID_HOME="$SDK_PATH"
 export ANDROID_SDK_ROOT="$SDK_PATH"
 export PATH="$SDK_PATH/platform-tools:$PATH"
 
-echo "Building VORA Android APK ($BUILD_MODE)..."
+echo "Building $PROJECT_NAME Android APK ($BUILD_MODE)..."
 echo "Android SDK: $SDK_PATH"
 
 (

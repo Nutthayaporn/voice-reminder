@@ -4,23 +4,36 @@ import {
   Animated,
   AppState,
   Easing,
-  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import Reanimated, {
+  Easing as ReanimatedEasing,
+  Extrapolation,
+  LinearTransition,
+  cancelAnimation,
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
+import * as Linking from 'expo-linking';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { colors, font, radius, spacing } from './src/theme';
 import { config, isGroqConfigured, isBudgetApiConfigured } from './src/config';
 import { getEngines } from './src/speech/engines';
 import { useVoiceInput } from './src/speech/useVoiceInput';
-import { speak } from './src/speech/tts';
-import type { SttEngineId, TranscriptResult } from './src/speech/types';
+import { speak, stopSpeaking } from './src/speech/tts';
+import type { SttEngineId, TranscriptResult, VoiceStatus } from './src/speech/types';
 import { planActions } from './src/brain/planActions';
 import { actionToItem } from './src/brain/toItem';
 import { searchMemory } from './src/brain/searchMemory';
@@ -50,6 +63,7 @@ import {
   isConnected as isBudgetConnected,
 } from './src/integrations/budgetOAuth';
 import { bkkDateStr } from './src/lib/date';
+import { CalendarMonth } from './src/components/CalendarMonth';
 import { CloudSyncPanel } from './src/components/CloudSyncPanel';
 import { HouseholdPanel } from './src/components/HouseholdPanel';
 import { EditItemModal, type ItemEditPatch } from './src/components/EditItemModal';
@@ -62,6 +76,12 @@ import {
   itemsForDeleteScope,
   resolveDeleteTarget,
 } from './src/store/delete';
+import {
+  clearPendingHouseholdInvite,
+  inviteCodeFromUrl,
+  loadPendingHouseholdInvite,
+  savePendingHouseholdInvite,
+} from './src/sharing/householdInvite';
 
 const HUD_HORIZONTAL_LINES = [86, 172, 258, 344, 430, 516, 602, 688] as const;
 const HUD_VERTICAL_LINES = [44, 132, 220, 308] as const;
@@ -73,16 +93,28 @@ const HUD_PARTICLES = [
 ] as const;
 const CORE_TICKS = Array.from({ length: 24 }, (_, index) => index);
 const WAVEFORM_HEIGHTS = [4, 9, 14, 7, 12, 5, 10] as const;
-type AppTab = 'talk' | 'items' | 'settings';
+type AppTab = 'talk' | 'items' | 'calendar' | 'settings';
 interface PendingBulkDelete {
   itemIds: string[];
   description: string;
 }
 
 export default function App() {
+  return (
+    <GestureHandlerRootView style={styles.gestureRoot}>
+      <VoiceReminderApp />
+    </GestureHandlerRootView>
+  );
+}
+
+function VoiceReminderApp() {
   const engines = useMemo(() => getEngines(), []);
   const preferredEngine = usePreferences((state) => state.preferredEngine);
   const setPreferredEngine = usePreferences((state) => state.setPreferredEngine);
+  const handsFreeEnabled = usePreferences((state) => state.handsFreeEnabled);
+  const setHandsFreeEnabled = usePreferences((state) => state.setHandsFreeEnabled);
+  const autoStopEnabled = usePreferences((state) => state.autoStopEnabled);
+  const setAutoStopEnabled = usePreferences((state) => state.setAutoStopEnabled);
   const defaultAlertMode = usePreferences((state) => state.defaultAlertMode);
   const setDefaultAlertMode = usePreferences((state) => state.setDefaultAlertMode);
   const activeHouseholdId = usePreferences((state) => state.activeHouseholdId);
@@ -93,16 +125,82 @@ export default function App() {
     'cloud';
   const [engine, setEngine] = useState<SttEngineId>(firstAvailable);
   const [activeTab, setActiveTab] = useState<AppTab>('talk');
+  const [selectedDate, setSelectedDate] = useState<string>(() => bkkDateStr());
   const [last, setLast] = useState<TranscriptResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [thinking, setThinking] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [handsFreePaused, setHandsFreePaused] = useState(false);
+  const [appIsActive, setAppIsActive] = useState(AppState.currentState === 'active');
   const [plan, setPlan] = useState<BrainPlan | null>(null);
   const [budgetConnected, setBudgetConnected] = useState(false);
   const [budgetBusy, setBudgetBusy] = useState(false);
+  const [pendingHouseholdInviteCode, setPendingHouseholdInviteCode] = useState<string | null>(null);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
   const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingBulkDeleteRef = useRef<PendingBulkDelete | null>(null);
+  const startListeningRef = useRef<() => Promise<void>>(async () => {});
+  const cancelListeningRef = useRef<() => Promise<void>>(async () => {});
+  const voiceStatusRef = useRef<VoiceStatus>('idle');
+  const responseTokenRef = useRef(0);
+  const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const talkWasEligibleRef = useRef(false);
+  const hasGreetedRef = useRef(false);
+  const wasOnTalkRef = useRef(activeTab === 'talk' && appIsActive);
+  const handsFreeEnabledRef = useRef(handsFreeEnabled);
+  const activeTabRef = useRef<AppTab>(activeTab);
+  const appIsActiveRef = useRef(appIsActive);
+  const thinkingRef = useRef(thinking);
+  const speakingRef = useRef(speaking);
+  const handsFreePausedRef = useRef(handsFreePaused);
+  const pendingHouseholdInviteCodeRef = useRef<string | null>(null);
+
+  handsFreeEnabledRef.current = handsFreeEnabled;
+  activeTabRef.current = activeTab;
+  appIsActiveRef.current = appIsActive;
+  thinkingRef.current = thinking;
+  speakingRef.current = speaking;
+  handsFreePausedRef.current = handsFreePaused;
+
+  const rememberHouseholdInvite = useCallback((inviteCode: string) => {
+    pendingHouseholdInviteCodeRef.current = inviteCode;
+    setPendingHouseholdInviteCode(inviteCode);
+    setActiveTab('settings');
+    void savePendingHouseholdInvite(inviteCode).catch(() => undefined);
+  }, []);
+
+  const dismissHouseholdInvite = useCallback(() => {
+    pendingHouseholdInviteCodeRef.current = null;
+    setPendingHouseholdInviteCode(null);
+    void clearPendingHouseholdInvite().catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    // getInitialURL covers a cold start; the subscription covers links tapped
+    // while VORA is already running. Persisted state lets sign-in complete in
+    // a browser/app round trip without losing the invitation.
+    void Promise.all([Linking.getInitialURL(), loadPendingHouseholdInvite()])
+      .then(([initialUrl, storedInvite]) => {
+        if (!mounted || pendingHouseholdInviteCodeRef.current) return;
+        const inviteFromUrl = initialUrl ? inviteCodeFromUrl(initialUrl) : null;
+        const inviteCode = inviteFromUrl ?? storedInvite;
+        if (inviteCode) rememberHouseholdInvite(inviteCode);
+      })
+      .catch(() => undefined);
+
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      const inviteCode = inviteCodeFromUrl(url);
+      if (inviteCode) rememberHouseholdInvite(inviteCode);
+    });
+
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, [rememberHouseholdInvite]);
 
   const items = useStore((state) => state.items);
   const userId = useStore((state) => state.userId);
@@ -119,6 +217,77 @@ export default function App() {
   // "แก้เมื่อกี้เป็น 60" / "ลบอันเมื่อกี้" can target it (expense_ref="last").
   const lastExpenseIdRef = useRef<string | null>(null);
 
+  const scheduleListeningStart = useCallback(
+    (delayMs = 300, allowWithoutHandsFree = false) => {
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
+      const responseToken = responseTokenRef.current;
+      const tryResume = () => {
+        if (
+          responseToken !== responseTokenRef.current ||
+          (!allowWithoutHandsFree && !handsFreeEnabledRef.current) ||
+          activeTabRef.current !== 'talk' ||
+          !appIsActiveRef.current ||
+          handsFreePausedRef.current
+        ) {
+          return;
+        }
+        if (thinkingRef.current || speakingRef.current) {
+          resumeTimerRef.current = setTimeout(tryResume, 150);
+          return;
+        }
+        if (voiceStatusRef.current === 'idle' || voiceStatusRef.current === 'error') {
+          void startListeningRef.current();
+        }
+      };
+      resumeTimerRef.current = setTimeout(tryResume, delayMs);
+    },
+    [],
+  );
+
+  // The Talk greeting always opens the microphone once. Later replies only
+  // reopen it when the independent Hands-free preference is enabled.
+  const say = useCallback(
+    (text: string, language?: string, listenAfter = false) => {
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
+      const responseToken = ++responseTokenRef.current;
+      speakingRef.current = true;
+      setSpeaking(true);
+
+      const finish = (completed: boolean) => {
+        if (responseToken !== responseTokenRef.current) return;
+        speakingRef.current = false;
+        setSpeaking(false);
+        if (completed && (listenAfter || handsFreeEnabledRef.current)) {
+          scheduleListeningStart(300, listenAfter);
+        }
+      };
+
+      speak(text, {
+        language,
+        onDone: () => finish(true),
+        onStopped: () => finish(false),
+        // TTS is an enhancement; if a platform has no matching voice, keep
+        // the requested flow moving without showing a processing error.
+        onError: () => finish(true),
+      });
+    },
+    [scheduleListeningStart],
+  );
+
+  const toggleHandsFree = useCallback(() => {
+    const enabled = !handsFreeEnabledRef.current;
+    handsFreeEnabledRef.current = enabled;
+    handsFreePausedRef.current = false;
+    setHandsFreePaused(false);
+    if (enabled) {
+      scheduleListeningStart(100);
+    } else {
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
+      void cancelListeningRef.current();
+    }
+    setHandsFreeEnabled(enabled);
+  }, [scheduleListeningStart, setHandsFreeEnabled]);
+
   useEffect(() => {
     if (!preferredEngine) return;
     const preferred = engines.find(
@@ -130,6 +299,7 @@ export default function App() {
   useEffect(
     () => () => {
       if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
     },
     [],
   );
@@ -149,7 +319,12 @@ export default function App() {
     void initNotifications();
     void syncNativeCompletions();
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') void syncNativeCompletions();
+      const active = state === 'active';
+      appIsActiveRef.current = active;
+      setAppIsActive(active);
+      if (active) {
+        void syncNativeCompletions();
+      }
     });
     return () => subscription.remove();
   }, [syncNativeCompletions]);
@@ -405,7 +580,7 @@ export default function App() {
         answer = await editExpenseViaApi(editExpense);
       }
 
-      speak(answer);
+      say(answer);
 
       if (deferredDeepLinkExpense) {
         const date = bkkDateStr(deferredDeepLinkExpense.datetime ?? new Date());
@@ -414,7 +589,7 @@ export default function App() {
           note: deferredDeepLinkExpense.title,
           date,
         });
-        if (!res.ok) speak('I could not open Daily Budget. Please check that it is installed.');
+        if (!res.ok) say('I could not open Daily Budget. Please check that it is installed.');
       }
 
       // Refresh what "อันแรก / อันเมื่อกี้" points at for the next turn.
@@ -428,7 +603,7 @@ export default function App() {
       }
       contextRef.current = { referents: toReferents(refItems), lastUtterance: rawText };
     },
-    [activeHouseholdId, addItem, applyUpdate, defaultAlertMode, removeItem, userId],
+    [activeHouseholdId, addItem, applyUpdate, defaultAlertMode, removeItem, say, userId],
   );
 
   const executeConfirmedBulkDelete = useCallback(
@@ -450,21 +625,29 @@ export default function App() {
         referents: toReferents(useStore.getState().items),
         lastUtterance: 'confirm delete',
       };
-      speak(answer);
+      say(answer);
     },
-    [removeItem],
+    [removeItem, say],
   );
 
   const handleResult = useCallback(
     (result: TranscriptResult) => {
       setError(null);
-      setLast(result);
-      setPlan(null);
 
       if (!result.text) {
-        speak('I did not hear anything. Please try again.');
+        if (handsFreeEnabledRef.current) {
+          handsFreePausedRef.current = true;
+          setHandsFreePaused(true);
+        } else {
+          say('I did not hear anything. Please try again.');
+        }
         return;
       }
+
+      setLast(result);
+      setPlan(null);
+      handsFreePausedRef.current = false;
+      setHandsFreePaused(false);
 
       const pendingBulk = pendingBulkDeleteRef.current;
       if (pendingBulk) {
@@ -475,7 +658,7 @@ export default function App() {
             .catch((caught: unknown) => {
               const message = caught instanceof Error ? caught.message : String(caught);
               setError(message);
-              speak('Sorry, I could not delete those items.');
+              say('Sorry, I could not delete those items.');
             })
             .finally(() => setThinking(false));
           return;
@@ -484,19 +667,19 @@ export default function App() {
           pendingBulkDeleteRef.current = null;
           const answer = 'Delete cancelled.';
           setPlan({ actions: [], speak_back: answer, needs_clarification: false, clarify_question: null });
-          speak(answer);
+          say(answer);
           return;
         }
         const question = `Nothing was deleted. To delete ${pendingBulk.description}, say “confirm”.`;
         setPlan({ actions: [], speak_back: question, needs_clarification: true, clarify_question: question });
-        speak(question);
+        say(question);
         return;
       }
 
       const currentItems = useStore.getState().items;
       const localDelete = planLocalDelete(result.text, currentItems, contextRef.current.referents);
       if (!localDelete && !isGroqConfigured()) {
-        speak(`You said: ${result.text}`);
+        say(`You said: ${result.text}`);
         return;
       }
 
@@ -522,7 +705,7 @@ export default function App() {
           // Not confident enough — ask instead of guessing; next turn completes it.
           if (resolvedPlan.needs_clarification && resolvedPlan.clarify_question) {
             contextRef.current = { ...contextRef.current, pending: result.text };
-            speak(resolvedPlan.clarify_question);
+            say(resolvedPlan.clarify_question);
             return;
           }
 
@@ -545,7 +728,7 @@ export default function App() {
                 ? `I could not find ${deleteScopeLabel(bulkAction.delete_scope)}.`
                 : 'I could not find the items you wanted to delete.';
               setPlan({ ...resolvedPlan, speak_back: answer, needs_clarification: false, clarify_question: null });
-              speak(answer);
+              say(answer);
               return;
             }
             const description = bulkAction?.delete_scope
@@ -557,7 +740,7 @@ export default function App() {
               description,
             };
             setPlan({ ...resolvedPlan, speak_back: question, needs_clarification: true, clarify_question: question });
-            speak(question);
+            say(question);
             return;
           }
           await executePlan(resolvedPlan, result.text);
@@ -565,11 +748,11 @@ export default function App() {
         .catch((caught: unknown) => {
           const message = caught instanceof Error ? caught.message : String(caught);
           setError(message);
-          speak('Sorry, I could not process that request.');
+          say('Sorry, I could not process that request.');
         })
         .finally(() => setThinking(false));
     },
-    [executeConfirmedBulkDelete, executePlan],
+    [executeConfirmedBulkDelete, executePlan, say],
   );
 
   const commitDelete = useCallback(
@@ -658,26 +841,127 @@ export default function App() {
     [updateItem],
   );
 
-  const handleError = useCallback((message: string) => setError(message), []);
+  const handleError = useCallback((message: string) => {
+    setError(message);
+    if (handsFreeEnabledRef.current) {
+      handsFreePausedRef.current = true;
+      setHandsFreePaused(true);
+    }
+  }, []);
 
-  const { status, partial, toggle } = useVoiceInput({
+  const { status, partial, start, toggle, cancel, requestPermission } = useVoiceInput({
     engine,
+    autoStop: autoStopEnabled,
     onResult: handleResult,
     onError: handleError,
   });
 
+  startListeningRef.current = start;
+  cancelListeningRef.current = cancel;
+  voiceStatusRef.current = status;
+
   const listening = status === 'listening';
   const busy = status === 'transcribing';
   const activeEngine = engines.find((candidate) => candidate.id === engine);
+  const talkAutoListenEligible =
+    activeTab === 'talk' &&
+    appIsActive &&
+    !!activeEngine?.available;
+
+  // Entering Talk always starts one voice turn. This is deliberately separate
+  // from Hands-free, which only controls whether listening continues later.
+  useEffect(() => {
+    const onTalk = activeTab === 'talk' && appIsActive;
+    if (onTalk && !wasOnTalkRef.current) {
+      handsFreePausedRef.current = false;
+      setHandsFreePaused(false);
+      setError(null);
+    }
+    wasOnTalkRef.current = onTalk;
+  }, [activeTab, appIsActive]);
+
+  useEffect(() => {
+    if (!talkAutoListenEligible) {
+      if (!talkWasEligibleRef.current) return;
+      talkWasEligibleRef.current = false;
+      responseTokenRef.current += 1;
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
+      if (speakingRef.current) stopSpeaking();
+      speakingRef.current = false;
+      setSpeaking(false);
+      void cancel();
+      return;
+    }
+
+    if (talkWasEligibleRef.current) return;
+    talkWasEligibleRef.current = true;
+    handsFreePausedRef.current = false;
+    setHandsFreePaused(false);
+
+    let disposed = false;
+    void requestPermission().then((granted) => {
+      if (
+        disposed ||
+        activeTabRef.current !== 'talk' ||
+        !appIsActiveRef.current
+      ) {
+        return;
+      }
+      if (!granted) {
+        handsFreePausedRef.current = true;
+        setHandsFreePaused(true);
+        setError('Microphone access was not granted.');
+        return;
+      }
+
+      if (!hasGreetedRef.current) {
+        hasGreetedRef.current = true;
+        say('สวัสดีค่ะ มีอะไรให้ช่วยบอกได้เลย', config.locale, true);
+      } else {
+        scheduleListeningStart(200, true);
+      }
+    });
+
+    return () => {
+      disposed = true;
+    };
+  }, [cancel, requestPermission, say, scheduleListeningStart, talkAutoListenEligible]);
+
+  const handleVoicePress = useCallback(() => {
+    handsFreePausedRef.current = false;
+    setHandsFreePaused(false);
+
+    if (speakingRef.current) {
+      responseTokenRef.current += 1;
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
+      stopSpeaking();
+      speakingRef.current = false;
+      setSpeaking(false);
+      resumeTimerRef.current = setTimeout(() => {
+        if (activeTabRef.current === 'talk' && appIsActiveRef.current) void start();
+      }, 200);
+      return;
+    }
+
+    toggle();
+  }, [start, toggle]);
+
   const coreStatus = busy
     ? 'TRANSCRIBING'
     : thinking
       ? 'PROCESSING'
-      : listening
-        ? 'LISTENING'
-        : 'READY FOR COMMAND';
+      : speaking
+        ? 'SPEAKING'
+        : listening
+          ? 'LISTENING'
+          : handsFreeEnabled && handsFreePaused
+            ? 'HANDS-FREE PAUSED'
+            : 'READY FOR COMMAND';
   const visibleItems = items.filter((item) => item.id !== pendingDelete?.id);
   const recentItems = visibleItems.slice(0, 3);
+  const dayItems = visibleItems
+    .filter((item) => itemCoversDay(item, selectedDate))
+    .sort((a, b) => (a.start_at ?? '').localeCompare(b.start_at ?? ''));
 
   return (
     <SafeAreaProvider>
@@ -688,28 +972,59 @@ export default function App() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <View style={styles.header}>
-            <View style={styles.brandRow}>
-              <View style={styles.brandMark}>
-                <Text style={styles.brandLetter}>V</Text>
-              </View>
-              <View style={styles.brandCopy}>
-                <Text style={styles.brand}>VORA</Text>
-                <Text style={styles.brandSub}>VOICE OPERATED REMINDER ASSISTANT</Text>
-              </View>
-            </View>
-            <View style={styles.headerRule} />
-          </View>
-
           {activeTab === 'talk' && (
             <>
               <View style={styles.hero}>
                 <View style={styles.coreStatusSlot}>
-                  {(listening || busy || thinking) && (
+                  {(listening || busy || thinking || speaking || handsFreeEnabled) && (
                     <Text style={styles.coreStatus}>{coreStatus}</Text>
                   )}
                 </View>
-                <AICore listening={listening} busy={busy} thinking={thinking} onPress={toggle} />
+                <AICore
+                  listening={listening}
+                  busy={busy}
+                  thinking={thinking}
+                  speaking={speaking}
+                  onPress={handleVoicePress}
+                />
+                <Pressable
+                  accessibilityLabel={`Hands-free ${handsFreeEnabled ? 'on' : 'off'}`}
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: handsFreeEnabled }}
+                  disabled={!handsFreeEnabled && (busy || thinking)}
+                  hitSlop={8}
+                  onPress={toggleHandsFree}
+                  style={({ pressed }) => [
+                    styles.handsFreeBadge,
+                    !handsFreeEnabled && styles.handsFreeBadgeOff,
+                    handsFreePaused && styles.handsFreeBadgePaused,
+                    pressed && styles.handsFreeBadgePressed,
+                  ]}
+                >
+                  <Ionicons
+                    name={handsFreeEnabled ? 'ear-outline' : 'ear'}
+                    size={16}
+                    color={handsFreeEnabled ? colors.primary : colors.textFaint}
+                  />
+                  <Text
+                    style={[
+                      styles.handsFreeBadgeText,
+                      !handsFreeEnabled && styles.handsFreeBadgeTextOff,
+                    ]}
+                  >
+                    HANDS-FREE
+                  </Text>
+                  <View style={[styles.handsFreeState, handsFreeEnabled && styles.handsFreeStateOn]}>
+                    <Text
+                      style={[
+                        styles.handsFreeStateText,
+                        handsFreeEnabled && styles.handsFreeStateTextOn,
+                      ]}
+                    >
+                      {handsFreeEnabled ? 'ON' : 'OFF'}
+                    </Text>
+                  </View>
+                </Pressable>
                 {activeEngine && !activeEngine.available && (
                   <View style={styles.warningPanel}>
                     <Text style={styles.warningText}>{activeEngine.unavailableReason}</Text>
@@ -726,7 +1041,7 @@ export default function App() {
                   <UserMessage
                     text={last.text || '(No transcript)'}
                     meta={`${last.engine === 'cloud' ? 'CLOUD STT' : last.engine === 'device' ? 'ON-DEVICE STT' : 'BROWSER STT'} · ${last.elapsedMs} MS`}
-                    onReplay={last.text ? () => speak(last.text, { language: config.locale }) : undefined}
+                    onReplay={last.text ? () => say(last.text, config.locale) : undefined}
                   />
                 )}
 
@@ -760,7 +1075,7 @@ export default function App() {
                         accessibilityRole="button"
                         hitSlop={10}
                         onPress={() =>
-                          speak(
+                          say(
                             plan.needs_clarification && plan.clarify_question
                               ? plan.clarify_question
                               : plan.speak_back,
@@ -878,20 +1193,64 @@ export default function App() {
             </View>
           )}
 
+          {activeTab === 'calendar' && (
+            <View style={styles.memorySection}>
+              <View style={styles.cleanSectionHeading}>
+                <View>
+                  <Text style={styles.screenTitle}>Calendar</Text>
+                  <Text style={styles.screenSubtitle}>Tap a day to see what's on it</Text>
+                </View>
+              </View>
+              <CalendarMonth
+                items={visibleItems}
+                selectedDate={selectedDate}
+                onSelectDate={setSelectedDate}
+              />
+              <View style={styles.calendarDayHeading}>
+                <Text style={styles.calendarDayTitle}>{formatDayHeading(selectedDate)}</Text>
+                <Text style={styles.calendarDayCount}>
+                  {dayItems.length} {dayItems.length === 1 ? 'item' : 'items'}
+                </Text>
+              </View>
+              {dayItems.length ? (
+                <View style={styles.itemList}>
+                  {dayItems.map((item) => (
+                    <ItemRow
+                      key={item.id}
+                      item={item}
+                      onToggle={() => void handleToggleDone(item)}
+                      onAlertModeChange={() => void handleAlertModeChange(item)}
+                      onSnoozeMinutesChange={() => void handleSnoozeMinutesChange(item)}
+                      onEdit={() => setEditingItem(item)}
+                      onDelete={() => handleDelete(item)}
+                    />
+                  ))}
+                </View>
+              ) : (
+                <View style={styles.calendarEmpty}>
+                  <Ionicons name="calendar-clear-outline" size={32} color={colors.textFaint} />
+                  <Text style={styles.calendarEmptyText}>Nothing scheduled for this day</Text>
+                </View>
+              )}
+            </View>
+          )}
+
           {activeTab === 'settings' && (
             <View style={styles.settingsPage}>
-              <View>
-                <Text style={styles.screenTitle}>Settings</Text>
-                <Text style={styles.screenSubtitle}>Voice, alerts, account, and sharing</Text>
-              </View>
+              <Text style={styles.screenTitle}>Settings</Text>
 
-              <Text style={styles.settingsSection}>ALERTS</Text>
+              <Text style={styles.settingsSection}>Account</Text>
+              <CloudSyncPanel autoOpen={!!pendingHouseholdInviteCode && !userId} />
+
+              <Text style={styles.settingsSection}>Alerts</Text>
               <View style={styles.settingsGroup}>
                 <View style={styles.settingsHeaderRow}>
-                  <Ionicons name="notifications-outline" size={20} color={colors.textMute} />
+                  <View style={styles.settingsIconTile}>
+                    <Ionicons name="notifications" size={18} color={colors.primary} />
+                  </View>
                   <View style={styles.settingsRowCopy}>
                     <Text style={styles.settingsRowLabel}>Default alert</Text>
-                    <Text style={styles.settingsRowHint}>Used when a command doesn't specify one</Text>
+                    <Text style={styles.settingsRowHint}>When a command doesn't say which</Text>
                   </View>
                 </View>
                 <View style={styles.segment}>
@@ -919,8 +1278,77 @@ export default function App() {
                 </View>
               </View>
 
-              <Text style={styles.settingsSection}>VOICE PROCESSOR</Text>
+              <Text style={styles.settingsSection}>Voice</Text>
               <View style={styles.settingsGroup}>
+                <Pressable
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: handsFreeEnabled }}
+                  disabled={listening || busy || thinking}
+                  onPress={toggleHandsFree}
+                  style={({ pressed }) => [
+                    styles.settingsRow,
+                    pressed && styles.settingsRowPressed,
+                    (listening || busy || thinking) && styles.settingsRowDisabled,
+                  ]}
+                >
+                  <View style={styles.settingsIconTile}>
+                    <Ionicons
+                      name="ear-outline"
+                      size={18}
+                      color={handsFreeEnabled ? colors.primary : colors.textMute}
+                    />
+                  </View>
+                  <View style={styles.settingsRowCopy}>
+                    <Text
+                      style={[
+                        styles.settingsRowLabel,
+                        handsFreeEnabled && styles.settingsRowLabelActive,
+                      ]}
+                    >
+                      Hands-free conversation
+                    </Text>
+                    <Text style={styles.settingsRowHint} numberOfLines={2}>
+                      Continue listening after each AI response
+                    </Text>
+                  </View>
+                  <View style={[styles.switchTrack, handsFreeEnabled && styles.switchTrackActive]}>
+                    <View style={[styles.switchThumb, handsFreeEnabled && styles.switchThumbActive]} />
+                  </View>
+                </Pressable>
+                <View style={styles.settingsSep} />
+                <Pressable
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: autoStopEnabled }}
+                  disabled={listening || busy || thinking}
+                  onPress={() => setAutoStopEnabled(!autoStopEnabled)}
+                  style={({ pressed }) => [
+                    styles.settingsRow,
+                    pressed && styles.settingsRowPressed,
+                    (listening || busy || thinking) && styles.settingsRowDisabled,
+                  ]}
+                >
+                  <View style={styles.settingsIconTile}>
+                    <Ionicons
+                      name="timer-outline"
+                      size={18}
+                      color={autoStopEnabled ? colors.primary : colors.textMute}
+                    />
+                  </View>
+                  <View style={styles.settingsRowCopy}>
+                    <Text style={[styles.settingsRowLabel, autoStopEnabled && styles.settingsRowLabelActive]}>
+                      Stop after silence
+                    </Text>
+                    <Text style={styles.settingsRowHint} numberOfLines={2}>
+                      {autoStopEnabled
+                        ? 'Stops automatically after about 1 second of silence'
+                        : 'Keep listening until you tap Stop'}
+                    </Text>
+                  </View>
+                  <View style={[styles.switchTrack, autoStopEnabled && styles.switchTrackActive]}>
+                    <View style={[styles.switchThumb, autoStopEnabled && styles.switchThumbActive]} />
+                  </View>
+                </Pressable>
+                <View style={styles.settingsSep} />
                 {engines.map((candidate, index) => {
                   const selected = candidate.id === engine;
                   const disabled = !candidate.available || listening || busy;
@@ -941,7 +1369,9 @@ export default function App() {
                           !candidate.available && styles.settingsRowDisabled,
                         ]}
                       >
-                        <Ionicons name="mic-outline" size={20} color={selected ? colors.primary : colors.textMute} />
+                        <View style={styles.settingsIconTile}>
+                          <Ionicons name="mic" size={18} color={selected ? colors.primary : colors.textMute} />
+                        </View>
                         <View style={styles.settingsRowCopy}>
                           <Text style={[styles.settingsRowLabel, selected && styles.settingsRowLabelActive]}>
                             {candidate.label}
@@ -959,14 +1389,16 @@ export default function App() {
 
               {isBudgetApiConfigured() && (
                 <>
-                  <Text style={styles.settingsSection}>DAILY BUDGET</Text>
+                  <Text style={styles.settingsSection}>Daily Budget</Text>
                   <View style={styles.settingsGroup}>
                     <View style={styles.settingsHeaderRow}>
-                      <Ionicons
-                        name={budgetConnected ? 'wallet' : 'wallet-outline'}
-                        size={20}
-                        color={budgetConnected ? colors.primary : colors.textMute}
-                      />
+                      <View style={styles.settingsIconTile}>
+                        <Ionicons
+                          name={budgetConnected ? 'wallet' : 'wallet-outline'}
+                          size={18}
+                          color={budgetConnected ? colors.primary : colors.textMute}
+                        />
+                      </View>
                       <View style={styles.settingsRowCopy}>
                         <Text style={styles.settingsRowLabel}>
                           {budgetConnected ? 'Connected' : 'Not connected'}
@@ -1013,8 +1445,11 @@ export default function App() {
                 </>
               )}
 
-              <CloudSyncPanel />
-              <HouseholdPanel />
+              <Text style={styles.settingsSection}>Sharing</Text>
+              <HouseholdPanel
+                pendingInviteCode={pendingHouseholdInviteCode}
+                onClearPendingInvite={dismissHouseholdInvite}
+              />
             </View>
           )}
         </ScrollView>
@@ -1053,6 +1488,7 @@ function BottomNav({
   const tabs: Array<{ id: AppTab; label: string }> = [
     { id: 'talk', label: 'TALK' },
     { id: 'items', label: 'ITEMS' },
+    { id: 'calendar', label: 'CALENDAR' },
     { id: 'settings', label: 'SETTINGS' },
   ];
   return (
@@ -1085,7 +1521,7 @@ function BottomNav({
 
 /** Bottom-nav icons from Ionicons — outline when inactive, filled when active. */
 function NavIcon({ id, active }: { id: AppTab; active: boolean }) {
-  const name =
+  const name: IoniconName =
     id === 'talk'
       ? active
         ? 'mic'
@@ -1094,9 +1530,13 @@ function NavIcon({ id, active }: { id: AppTab; active: boolean }) {
         ? active
           ? 'list'
           : 'list-outline'
-        : active
-          ? 'settings'
-          : 'settings-outline';
+        : id === 'calendar'
+          ? active
+            ? 'calendar'
+            : 'calendar-outline'
+          : active
+            ? 'settings'
+            : 'settings-outline';
   return <Ionicons name={name} size={23} color={active ? colors.primary : colors.textFaint} />;
 }
 
@@ -1199,16 +1639,18 @@ function AICore({
   listening,
   busy,
   thinking,
+  speaking,
   onPress,
 }: {
   listening: boolean;
   busy: boolean;
   thinking: boolean;
+  speaking: boolean;
   onPress: () => void;
 }) {
   const rotation = useRef(new Animated.Value(0)).current;
   const pulse = useRef(new Animated.Value(1)).current;
-  const active = listening || busy || thinking;
+  const active = listening || busy || thinking || speaking;
 
   useEffect(() => {
     rotation.setValue(0);
@@ -1288,7 +1730,9 @@ function AICore({
 
         <Animated.View style={[styles.corePulse, { transform: [{ scale: pulse }] }]}>
           <Pressable
-            accessibilityLabel={listening ? 'Stop listening' : 'Start talking'}
+            accessibilityLabel={
+              listening ? 'Stop listening' : speaking ? 'Interrupt and start talking' : 'Start talking'
+            }
             accessibilityRole="button"
             disabled={busy || thinking}
             onPress={onPress}
@@ -1313,7 +1757,13 @@ function AICore({
                   />
                 )}
                 <Text style={styles.coreButtonLabel}>
-                  {thinking ? 'THINKING' : listening ? 'TAP TO STOP' : 'TAP TO TALK'}
+                  {thinking
+                    ? 'THINKING'
+                    : speaking
+                      ? 'TAP TO INTERRUPT'
+                      : listening
+                        ? 'TAP TO STOP'
+                        : 'TAP TO TALK'}
                 </Text>
                 <View style={styles.waveform}>
                   {WAVEFORM_HEIGHTS.map((height, index) => (
@@ -1346,6 +1796,32 @@ const TYPE_META: Record<Item['type'], { icon: IoniconName; label: string }> = {
   todo: { icon: 'checkbox-outline', label: 'TODO' },
   note: { icon: 'document-text-outline', label: 'NOTE' },
 };
+
+/** True when a dated item falls on `day` ('YYYY-MM-DD', Bangkok) — matching its
+ *  start day, or any day inside its start–end range. Undated notes never match. */
+function itemCoversDay(item: Item, day: string): boolean {
+  if (!item.start_at) return false;
+  const start = bkkDateStr(item.start_at);
+  if (!item.end_at) return start === day;
+  const end = bkkDateStr(item.end_at);
+  return day >= start && day <= (end >= start ? end : start);
+}
+
+/** "Today", "Tomorrow", or "Wed, 10 Sep 2026" for the day-list heading. */
+function formatDayHeading(day: string): string {
+  const today = bkkDateStr();
+  if (day === today) return 'Today';
+  const tomorrow = new Date(`${today}T00:00:00+07:00`);
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+  if (day === bkkDateStr(tomorrow)) return 'Tomorrow';
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Bangkok',
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  }).format(new Date(`${day}T00:00:00+07:00`));
+}
 
 /** Build the referable-items list the brain uses to resolve "อันแรก" etc.
  *  Includes the raw ISO start so the model can edit time while keeping the day. */
@@ -1486,70 +1962,118 @@ function ItemRow({
   );
 }
 
-/** Native-feeling row: tap opens the editor, swipe left past the threshold
- *  deletes (routing through the same undo bar as the button did). Built on
- *  PanResponder + Animated so it needs no gesture-handler dependency and works
- *  on web too. Only claims horizontal drags, leaving vertical scroll to the list. */
+const SWIPE_ACTION_WIDTH = 112;
+const SWIPE_DELETE_THRESHOLD = 88;
+
+/** Native-feeling row: the gesture and horizontal motion stay on the UI thread,
+ *  while the data deletion still routes through the existing undo flow. */
 function SwipeableRow({ onDelete, children }: { onDelete: () => void; children: ReactNode }) {
-  const translateX = useRef(new Animated.Value(0)).current;
+  const translateX = useSharedValue(0);
+  const dragStartX = useSharedValue(0);
+  const rowWidth = useSharedValue(0);
+  const deleting = useSharedValue(false);
   const onDeleteRef = useRef(onDelete);
   onDeleteRef.current = onDelete;
 
-  const pan = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_evt, g) =>
-        Math.abs(g.dx) > 14 && Math.abs(g.dx) > Math.abs(g.dy) * 1.6,
-      onPanResponderMove: (_evt, g) => {
-        translateX.setValue(Math.max(-160, Math.min(0, g.dx)));
-      },
-      onPanResponderRelease: (_evt, g) => {
-        const shouldDelete = g.dx < -96 || g.vx < -0.55;
-        if (shouldDelete) {
-          Animated.timing(translateX, {
-            toValue: -600,
-            duration: 200,
-            easing: Easing.in(Easing.ease),
-            useNativeDriver: true,
-          }).start(() => onDeleteRef.current());
-        } else {
-          Animated.spring(translateX, {
-            toValue: 0,
-            bounciness: 6,
-            useNativeDriver: true,
-          }).start();
-        }
-      },
-      onPanResponderTerminate: () => {
-        Animated.spring(translateX, { toValue: 0, useNativeDriver: true }).start();
-      },
-    }),
-  ).current;
+  const finishDelete = useCallback(() => onDeleteRef.current(), []);
 
-  const backdropOpacity = translateX.interpolate({
-    inputRange: [-96, -32, 0],
-    outputRange: [1, 0.5, 0],
-    extrapolate: 'clamp',
-  });
+  const pan = useMemo(
+    () =>
+      Gesture.Pan()
+        // Claim deliberate left swipes only. A vertical move fails early so the
+        // surrounding ScrollView keeps control while the user browses the list.
+        .activeOffsetX([-12, 100_000])
+        .failOffsetY([-12, 12])
+        .cancelsTouchesInView(true)
+        .onStart(() => {
+          cancelAnimation(translateX);
+          dragStartX.value = translateX.value;
+        })
+        .onUpdate((event) => {
+          const rawX = Math.min(0, dragStartX.value + event.translationX);
+          translateX.value =
+            rawX < -SWIPE_ACTION_WIDTH
+              ? -SWIPE_ACTION_WIDTH + (rawX + SWIPE_ACTION_WIDTH) * 0.2
+              : rawX;
+        })
+        .onEnd((event) => {
+          const shouldDelete =
+            event.translationX < -SWIPE_DELETE_THRESHOLD ||
+            (event.translationX < -24 && event.velocityX < -800);
+
+          if (shouldDelete) {
+            deleting.value = true;
+            translateX.value = withTiming(
+              -rowWidth.value - 32,
+              {
+                duration: 180,
+                easing: ReanimatedEasing.out(ReanimatedEasing.cubic),
+              },
+              (finished) => {
+                if (finished) scheduleOnRN(finishDelete);
+              },
+            );
+          } else {
+            translateX.value = withSpring(0, {
+              damping: 22,
+              stiffness: 260,
+              mass: 0.75,
+              overshootClamping: true,
+            });
+          }
+        })
+        .onFinalize((_event, success) => {
+          if (!success && !deleting.value) {
+            translateX.value = withSpring(0, {
+              damping: 22,
+              stiffness: 260,
+              mass: 0.75,
+              overshootClamping: true,
+            });
+          }
+        }),
+    [deleting, dragStartX, finishDelete, rowWidth, translateX],
+  );
+
+  const rowAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: translateX.value }],
+  }));
+
+  const backdropAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      translateX.value,
+      [-SWIPE_DELETE_THRESHOLD, -28, 0],
+      [1, 0.45, 0],
+      Extrapolation.CLAMP,
+    ),
+  }));
 
   return (
-    <View style={styles.swipeContainer}>
-      <Animated.View
+    <Reanimated.View
+      layout={LinearTransition.duration(180).easing(ReanimatedEasing.out(ReanimatedEasing.cubic))}
+      onLayout={({ nativeEvent }) => {
+        rowWidth.value = nativeEvent.layout.width;
+      }}
+      style={styles.swipeContainer}
+    >
+      <Reanimated.View
         pointerEvents="none"
-        style={[styles.swipeBackdrop, { opacity: backdropOpacity }]}
+        style={[styles.swipeBackdrop, backdropAnimatedStyle]}
       >
         <View style={styles.swipeDeleteBadge}>
           <Ionicons name="trash-outline" size={22} color="#fff" />
           <Text style={styles.swipeDeleteLabel}>DELETE</Text>
         </View>
-      </Animated.View>
-      <Animated.View style={{ transform: [{ translateX }] }} {...pan.panHandlers}>
-        {children}
-      </Animated.View>
-    </View>
+      </Reanimated.View>
+      <GestureDetector gesture={pan} touchAction="pan-y">
+        <Reanimated.View style={rowAnimatedStyle}>{children}</Reanimated.View>
+      </GestureDetector>
+    </Reanimated.View>
   );
 }
 
 const styles = StyleSheet.create({
+  gestureRoot: { flex: 1 },
   safe: { flex: 1, backgroundColor: colors.bg },
   bottomSafeArea: { backgroundColor: colors.bgAlt },
   backdrop: { position: 'absolute', inset: 0, overflow: 'hidden' },
@@ -1573,21 +2097,6 @@ const styles = StyleSheet.create({
     flexGrow: 1, paddingHorizontal: spacing.lg, paddingTop: spacing.md,
     paddingBottom: spacing.xl, gap: spacing.xl,
   },
-  header: { gap: spacing.md },
-  brandRow: { flexDirection: 'row', alignItems: 'center' },
-  brandMark: {
-    width: 42, height: 42, borderWidth: 1, borderColor: colors.primary,
-    alignItems: 'center', justifyContent: 'center', transform: [{ rotate: '45deg' }],
-    shadowColor: colors.primary, shadowOpacity: 0.3, shadowRadius: 8,
-  },
-  brandLetter: {
-    color: colors.primaryBright, fontSize: font.lg, fontWeight: '300',
-    transform: [{ rotate: '-45deg' }],
-  },
-  brandCopy: { flex: 1, marginLeft: spacing.lg, gap: 3 },
-  brand: { color: colors.text, fontSize: font.xl, fontWeight: '800', letterSpacing: 6 },
-  brandSub: { color: colors.textFaint, fontSize: 8, letterSpacing: 1.25 },
-  headerRule: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border },
   telemetry: {
     flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm,
     borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth,
@@ -1660,6 +2169,27 @@ const styles = StyleSheet.create({
   orbitCodeRight: { right: 1, top: 147, transform: [{ rotate: '90deg' }] },
   coreHint: { color: colors.textFaint, fontSize: font.sm, textAlign: 'center', marginTop: spacing.xs },
   coreHintActive: { color: colors.textMute },
+  handsFreeBadge: {
+    minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: spacing.xs,
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: radius.pill,
+    borderWidth: 1, borderColor: colors.primaryDark, backgroundColor: colors.primarySoft,
+  },
+  handsFreeBadgeOff: { borderColor: colors.border, backgroundColor: colors.card },
+  handsFreeBadgePaused: {
+    borderColor: colors.warning, backgroundColor: 'rgba(255, 209, 102, 0.07)',
+  },
+  handsFreeBadgePressed: { opacity: 0.7 },
+  handsFreeBadgeText: {
+    color: colors.primaryBright, fontSize: 8, fontWeight: '800', letterSpacing: 0.8,
+  },
+  handsFreeBadgeTextOff: { color: colors.textMute },
+  handsFreeState: {
+    minWidth: 30, alignItems: 'center', paddingHorizontal: 6, paddingVertical: 3,
+    borderRadius: radius.pill, backgroundColor: colors.cardRaised,
+  },
+  handsFreeStateOn: { backgroundColor: colors.primaryDark },
+  handsFreeStateText: { color: colors.textFaint, fontSize: 7, fontWeight: '900' },
+  handsFreeStateTextOn: { color: colors.primaryBright },
   warningPanel: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.md,
     paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
@@ -1766,6 +2296,16 @@ const styles = StyleSheet.create({
   errorText: { color: colors.textMute, fontSize: font.xs },
   memorySection: { gap: spacing.md },
   itemList: { gap: spacing.sm },
+  calendarDayHeading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: spacing.xs,
+  },
+  calendarDayTitle: { color: colors.text, fontSize: font.md, fontWeight: '700' },
+  calendarDayCount: { color: colors.textMute, fontSize: font.sm },
+  calendarEmpty: { alignItems: 'center', gap: spacing.sm, paddingVertical: 44 },
+  calendarEmptyText: { color: colors.textFaint, fontSize: font.sm },
   itemRow: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
     backgroundColor: colors.card, borderWidth: 1, borderRadius: radius.lg,
@@ -1852,10 +2392,10 @@ const styles = StyleSheet.create({
   emptyText: { color: colors.textMute, fontSize: font.sm, textAlign: 'center', lineHeight: 20 },
   emptyButton: { marginTop: spacing.md, borderRadius: radius.md, backgroundColor: colors.primaryDark, paddingHorizontal: spacing.xl, paddingVertical: spacing.md },
   emptyButtonText: { color: colors.onPrimary, fontSize: font.sm, fontWeight: '800' },
-  settingsPage: { gap: spacing.xs },
-  settingsSection: { color: colors.textFaint, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginTop: spacing.lg, marginBottom: spacing.sm, marginLeft: spacing.xs },
+  settingsPage: { gap: spacing.xs, paddingBottom: spacing.lg },
+  settingsSection: { color: colors.textMute, fontSize: 12, fontWeight: '700', letterSpacing: 0.8, textTransform: 'uppercase', marginTop: spacing.xl, marginBottom: spacing.sm, marginLeft: spacing.xs },
   settingsGroup: { backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
-  settingsRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, minHeight: 58, paddingVertical: spacing.md, paddingHorizontal: spacing.lg },
+  settingsRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, minHeight: 60, paddingVertical: spacing.md, paddingHorizontal: spacing.lg },
   settingsRowPressed: { backgroundColor: colors.cardRaised },
   settingsRowDisabled: { opacity: 0.4 },
   settingsHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingTop: spacing.md, paddingHorizontal: spacing.lg },
@@ -1863,7 +2403,15 @@ const styles = StyleSheet.create({
   settingsRowLabel: { color: colors.text, fontSize: font.md, fontWeight: '600' },
   settingsRowLabelActive: { color: colors.primaryBright },
   settingsRowHint: { color: colors.textMute, fontSize: font.xs, lineHeight: 16 },
-  settingsSep: { height: 1, backgroundColor: colors.border, marginLeft: 52 },
+  settingsSep: { height: 1, backgroundColor: colors.border, marginLeft: 64 },
+  settingsIconTile: { width: 34, height: 34, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
+  switchTrack: {
+    width: 42, height: 24, borderRadius: 12, padding: 3, justifyContent: 'center',
+    backgroundColor: colors.cardRaised, borderWidth: 1, borderColor: colors.borderBright,
+  },
+  switchTrackActive: { backgroundColor: colors.primaryDark, borderColor: colors.primary },
+  switchThumb: { width: 16, height: 16, borderRadius: 8, backgroundColor: colors.textFaint },
+  switchThumbActive: { backgroundColor: colors.primaryBright, alignSelf: 'flex-end' },
   segment: { flexDirection: 'row', gap: spacing.xs, backgroundColor: colors.cardRaised, borderRadius: radius.md, padding: spacing.xs, margin: spacing.md, marginTop: spacing.sm },
   segmentChip: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 9, borderRadius: radius.sm, borderWidth: 1, borderColor: 'transparent' },
   segmentChipActive: { backgroundColor: colors.primarySoft, borderColor: colors.primaryDark },
@@ -1871,7 +2419,8 @@ const styles = StyleSheet.create({
   segmentChipTextActive: { color: colors.primaryBright },
   budgetBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    marginTop: spacing.md, paddingVertical: 12, borderRadius: radius.sm,
+    marginHorizontal: spacing.lg, marginTop: spacing.md, marginBottom: spacing.md,
+    paddingVertical: 13, borderRadius: radius.md,
     borderWidth: 1, borderColor: colors.primaryDark, backgroundColor: colors.primarySoft,
   },
   budgetBtnDisconnect: { backgroundColor: colors.dangerSoft, borderColor: colors.danger },

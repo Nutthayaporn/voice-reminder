@@ -24,6 +24,19 @@ implementation สลับได้ที่ runtime (ดู `src/speech/`)
     และไม่อัปโหลดไฟล์เสียง; แสดงเฉพาะ Browser engine บน web
 - **สถานะ** เป็น state machine เล็ก ๆ: `idle → listening → transcribing → idle`
   (`transcribing` ใช้จริงเฉพาะ cloud เพราะต้องรออัพโหลด) — ดู `VoiceStatus` ใน `types.ts`
+- **Talk auto-listen** เป็น one-shot controller ใน `App.tsx`:
+  ครั้งแรกของ app session คือ `permission → greeting → listening → processing → speaking → idle`;
+  การกลับเข้า Talk ครั้งถัดไปจะข้าม greeting แล้วเริ่ม listening เลย. ค่า greeted อยู่ใน memory
+  ตลอดอายุ component จึงรีเซ็ตเฉพาะเมื่อปิด/เปิดแอปใหม่ ไม่รีเซ็ตเมื่อสลับแท็บหรือกลับจาก background.
+  ทุกครั้งทำงานโดยไม่อ่าน Hands-free preference และยกเลิกเมื่อเปลี่ยนแท็บหรือเข้า background.
+- **Hands-free conversation** เป็น preference แยก (default `false`) ซึ่งเปิดไมค์อีกครั้ง
+  หลัง AI ตอบ ผู้ใช้เปิดปิดได้ทั้งจากหน้า Talk และ Settings.
+  Cloud ใช้ metering ของ `expo-audio` เป็น VAD, วัด noise floor ช่วง 600 ms แรกเพื่อไม่ให้
+  เสียงทีวี/พัดลมถูกนับเป็นเสียงพูดค้าง แล้วหยุดหลังเงียบ 1.2 วินาที; device/web ใช้
+  natural endpoint ของ recognizer ร่วมกับ silence hint/timer. Preference `autoStopEnabled`
+  (default `true`) ใช้ปิด
+  endpoint อัตโนมัติได้; เมื่อปิด cloud จะไม่รัน VAD และ device/web จะใช้ continuous mode
+  เพื่อรอให้ผู้ใช้แตะ Stop. Tap-to-talk ยังคงใช้ `start/stop/toggle` ชุดเดิม.
 - **TTS** (`tts.ts`) แยกเป็นชิ้นของตัวเอง วันนี้ใช้เสียง OS (ฟรี มีเสียงไทย) เปลี่ยนเป็น
   cloud voice (ElevenLabs/OpenAI/Google) ทีหลังได้โดยไม่แตะผู้เรียก
 
@@ -145,6 +158,13 @@ Migration `20260831030000_shared_households.sql` เพิ่ม `households`, `
 และแก้ไขได้โดยสมาชิกทุกคนผ่าน RLS. Invite code ใช้สำหรับ join เท่านั้นและทุก RPC ตรวจ
 `auth.uid()`. `items.id` เปลี่ยนเป็น conflict key เดี่ยวเพื่อให้สมาชิกคนอื่น upsert แถวที่ไม่ได้
 เป็นผู้สร้างได้ โดย `user_id` เดิมยังเก็บผู้สร้างรายการไว้
+
+Migration `20260906000000_household_invite_links.sql` เพิ่ม RPC สำหรับ preview ชื่อพื้นที่ก่อน
+ยืนยัน join. UI ส่ง code ภายใน invite URL, รับได้ทั้ง cold start และขณะเปิดแอป, และเก็บ pending
+invite ใน AsyncStorage ระหว่าง sign-in. Native ใช้ `voicereminder://join?code=…` เป็นค่าเริ่มต้น;
+Expo Go ใช้ development URL; web ใช้ origin ปัจจุบัน. เมื่อตั้ง
+`EXPO_PUBLIC_INVITE_BASE_URL` ทุกแพลตฟอร์มจะ share HTTPS URL ของ PWA แทน โดยช่องกรอก code
+เดิมยังคงอยู่เป็น fallback. การเปิดลิงก์ไม่ join ทันที—ผู้ใช้ต้องเห็นชื่อพื้นที่และยืนยันก่อนเสมอ
 
 ตัดสินใจใช้ **ตารางเดียว `items`** แยกชนิดด้วยคอลัมน์ `type` (ตามที่เจ้าของแอปเลือก —
 ไม่แยกตาราง holidays; วันหยุดก็คือ item ชนิดหนึ่ง). Schema จริงพร้อม RLS/LWW functions อยู่ที่
