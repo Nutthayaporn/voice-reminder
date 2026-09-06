@@ -1,3 +1,4 @@
+import { disableWebPush } from '../notify/webPush';
 // Local-first Zustand store with an optional Supabase sync layer.
 //
 // Local mutations are always immediate. While signed in, durable pending ops
@@ -15,6 +16,8 @@ import { ensureNotifyPermission } from '../notify/setup';
 import { cancelNotifications, scheduleForItem } from '../notify/scheduler';
 import * as cloud from './cloud';
 import type { CloudItemRow } from './cloud';
+import { setAlertViewer } from '../notify/audience';
+import { linkedChildren, linkedPatches } from './linkedItems';
 import type { Item } from './types';
 
 export type SyncMode = 'local' | 'cloud';
@@ -57,7 +60,7 @@ interface StoreState {
   addItem: (item: Item) => void;
   removeItem: (id: string) => void;
   toggleDone: (id: string) => void;
-  updateItem: (id: string, patch: Partial<Item>) => void;
+  updateItem: (id: string, patch: Partial<Item>) => Promise<void>;
 
   bootstrapSync: () => Promise<void>;
   signInWithPassword: (email: string, password: string) => Promise<{ error?: string }>;
@@ -122,6 +125,9 @@ function hasDatabaseCode(error: unknown): boolean {
 
 function scheduleFingerprint(item: Item): string {
   return JSON.stringify({
+    audience: item.details?.notify_user_ids,
+    occurrences: item.details?.occurrences,
+    done: item.done,
     type: item.type,
     title: item.title,
     start_at: item.start_at,
@@ -178,6 +184,8 @@ export const useStore = create<StoreState>()(
       };
 
       const leaveCloud = () => {
+        setAlertViewer(null);
+        for (const item of get().items.filter((item) => item.household_id)) void cancelNotifications(item.notificationIds);
         realtimeUnsubscribe?.();
         realtimeUnsubscribe = null;
         set({
@@ -189,6 +197,7 @@ export const useStore = create<StoreState>()(
       };
 
       const enterCloud = async (userId: string, email: string | null) => {
+        setAlertViewer(userId);
         const changedUser = get().userId !== userId;
         const previousOwner = get().cacheOwnerId;
         if (previousOwner && previousOwner !== userId) {
@@ -215,6 +224,15 @@ export const useStore = create<StoreState>()(
           });
         }
         await get().syncNow();
+        if (changedUser) {
+          for (const item of get().items.filter((item) => item.household_id)) {
+            if (get().userId !== userId) break;
+            await cancelNotifications(item.notificationIds);
+            const notificationIds = await scheduleForItem(item);
+            if (get().userId === userId) set((state) => ({ items: state.items.map((current) => current.id === item.id ? { ...current, notificationIds } : current) }));
+            else await cancelNotifications(notificationIds);
+          }
+        }
       };
 
       const mergeCloudRows = async (rows: CloudItemRow[], userId: string) => {
@@ -310,8 +328,12 @@ export const useStore = create<StoreState>()(
 
         removeItem: (id) => {
           const updatedAt = new Date().toISOString();
-          set((state) => ({ items: state.items.filter((item) => item.id !== id) }));
-          queueDelete(id, updatedAt);
+          const parent = get().items.find((item) => item.id === id);
+          const family = parent ? [parent, ...linkedChildren(get().items, parent)] : [];
+          const ids = new Set([id, ...family.map((item) => item.id)]);
+          for (const item of family) void cancelNotifications(item.notificationIds);
+          set((state) => ({ items: state.items.filter((item) => !ids.has(item.id)) }));
+          for (const itemId of ids) queueDelete(itemId, updatedAt);
         },
 
         toggleDone: (id) => {
@@ -325,7 +347,18 @@ export const useStore = create<StoreState>()(
           if (item) queueUpsert(item);
         },
 
-        updateItem: (id, patch) => {
+        updateItem: async (id, patch) => {
+          const parent = get().items.find((item) => item.id === id);
+          const account = get().userId;
+          const linked = parent ? linkedPatches(get().items, parent, patch) : [];
+          for (const change of linked) {
+            const child = get().items.find((item) => item.id === change.id);
+            if (!child) continue;
+            await cancelNotifications(child.notificationIds);
+            const notificationIds = await scheduleForItem({ ...child, ...change.patch });
+            if (get().userId !== account) { await cancelNotifications(notificationIds); return; }
+            await get().updateItem(child.id, { ...change.patch, notificationIds });
+          }
           const updatedAt = new Date().toISOString();
           set((state) => ({
             items: state.items.map((item) =>
@@ -490,6 +523,7 @@ export const useStore = create<StoreState>()(
         },
 
         signOut: async () => {
+          await disableWebPush();
           try {
             await supabase?.auth.signOut();
           } finally {

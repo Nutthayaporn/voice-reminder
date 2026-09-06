@@ -1,9 +1,11 @@
+import { WebPushPanel } from './src/components/WebPushPanel';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Animated,
   AppState,
   Easing,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -65,6 +67,22 @@ import {
 import { bkkDateStr } from './src/lib/date';
 import { CalendarMonth } from './src/components/CalendarMonth';
 import { CloudSyncPanel } from './src/components/CloudSyncPanel';
+import { PersonalDefaultsPanel } from './src/components/PersonalDefaultsPanel';
+import { ItemActionsPanel } from './src/components/ItemActionsPanel';
+import { assignmentPatch } from './src/domain/assignment';
+import { dateKey, occurrencePatch, occursOn } from './src/domain/recurrence';
+import { busySlots, freeSlots } from './src/domain/availability';
+import { changeDefaults, initialDefaults, replyLanguage } from './src/domain/defaults';
+import { localizeReply } from './src/i18n/replies';
+import { KnowledgePanel } from './src/components/KnowledgePanel';
+import { shoppingDuplicate } from './src/store/planning';
+import { linkedChildren, validatePlanLinks } from './src/store/linkedItems';
+import { entityContext, validateEntityLinks } from './src/knowledge/entities';
+import { CapabilityGuide } from './src/components/CapabilityGuide';
+import { capabilityAnswer, isHelpQuestion } from './src/help/capabilities';
+import { SpacePicker } from './src/components/SpacePicker';
+import { useSpaces } from './src/spaces/useSpaces';
+import { itemsInSpace, resolveSpace, spaceLabel } from './src/spaces/routing';
 import { HouseholdPanel } from './src/components/HouseholdPanel';
 import { EditItemModal, type ItemEditPatch } from './src/components/EditItemModal';
 import { usePreferences } from './src/store/usePreferences';
@@ -97,6 +115,8 @@ type AppTab = 'talk' | 'items' | 'calendar' | 'settings';
 interface PendingBulkDelete {
   itemIds: string[];
   description: string;
+  userId: string | null;
+  scopes: Record<string, string | null>;
 }
 
 export default function App() {
@@ -134,8 +154,14 @@ function VoiceReminderApp() {
   const [appIsActive, setAppIsActive] = useState(AppState.currentState === 'active');
   const [plan, setPlan] = useState<BrainPlan | null>(null);
   const [budgetConnected, setBudgetConnected] = useState(false);
+  const helpOptions = { web: Platform.OS === 'web', budget: budgetConnected || (isBudgetApiConfigured() && !!config.budgetApi.token), shared: !!useStore((state) => state.userId) };
+  const helpOptionsRef = useRef(helpOptions);
+  helpOptionsRef.current = helpOptions;
   const [budgetBusy, setBudgetBusy] = useState(false);
   const [pendingHouseholdInviteCode, setPendingHouseholdInviteCode] = useState<string | null>(null);
+  const [memorySources, setMemorySources] = useState<Item[]>([]);
+  const languageRef = useRef<'th' | 'en'>('th');
+  const conflictRef = useRef<{ plan: BrainPlan; text: string; userId: string | null; space: string | null } | null>(null);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
   const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -204,6 +230,7 @@ function VoiceReminderApp() {
 
   const items = useStore((state) => state.items);
   const userId = useStore((state) => state.userId);
+  useEffect(() => { void useSpaces.getState().refresh().catch(() => {}); }, [userId, appIsActive]);
   const hasHydrated = useStore((state) => state.hasHydrated);
   const addItem = useStore((state) => state.addItem);
   const removeItem = useStore((state) => state.removeItem);
@@ -216,6 +243,16 @@ function VoiceReminderApp() {
   // The id of the last expense we logged to daily-budget this session, so
   // "แก้เมื่อกี้เป็น 60" / "ลบอันเมื่อกี้" can target it (expense_ref="last").
   const lastExpenseIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    contextRef.current = { referents: [] };
+    usePreferences.getState().setActiveHouseholdId(null);
+    pendingBulkDeleteRef.current = null;
+    lastExpenseIdRef.current = null;
+  }, [userId]);
+  useEffect(() => {
+    contextRef.current = { ...contextRef.current, referents: [] };
+    pendingBulkDeleteRef.current = null;
+  }, [activeHouseholdId]);
 
   const scheduleListeningStart = useCallback(
     (delayMs = 300, allowWithoutHandsFree = false) => {
@@ -262,8 +299,8 @@ function VoiceReminderApp() {
         }
       };
 
-      speak(text, {
-        language,
+      speak(language ? text : localizeReply(text, languageRef.current), {
+        language: language ?? (languageRef.current === 'th' ? 'th-TH' : 'en-US'),
         onDone: () => finish(true),
         onStopped: () => finish(false),
         // TTS is an enhancement; if a platform has no matching voice, keep
@@ -304,14 +341,32 @@ function VoiceReminderApp() {
     [],
   );
 
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !hasHydrated || typeof window === 'undefined') return;
+    const target = new URL(window.location.href).searchParams.get('item');
+    const item = items.find((candidate) => candidate.id === target);
+    if (item) { setEditingItem(item); const url = new URL(window.location.href); url.searchParams.delete('item'); window.history.replaceState(null, '', url.href); }
+  }, [hasHydrated, items]);
+
   const syncNativeCompletions = useCallback(async () => {
     const completedIds = await consumeCompletedNativeAlarmItemIds();
-    if (!completedIds.length) return;
-    const completed = new Set(completedIds);
-    for (const item of useStore.getState().items) {
-      if (!completed.has(item.id) || item.done) continue;
+    for (const completedId of completedIds) {
+      const [id, occurrence] = completedId.split('~');
+      const item = useStore.getState().items.find((candidate) => candidate.id === id);
+      if (!item || item.done) continue;
+      const patch = item.recurrence ? occurrencePatch(item, dateKey(occurrence ?? new Date()), 'done') : { done: true };
       await cancelNotifications(item.notificationIds);
-      updateItem(item.id, { done: true, notificationIds: [] });
+      await updateItem(item.id, { ...patch, notificationIds: await scheduleForItem({ ...item, ...patch }) });
+    }
+    // Exception-based series use a rolling queue; replenish it whenever the app
+    // resumes, keeping notification IDs device-local (no artificial cloud edit).
+    for (const item of useStore.getState().items) {
+      if (!item.recurrence || item.done || (!Object.keys(item.details?.occurrences ?? {}).length && item.recurrence.interval <= 1)) continue;
+      await cancelNotifications(item.notificationIds);
+      const notificationIds = await scheduleForItem(item);
+      const current = useStore.getState().items.find((candidate) => candidate.id === item.id);
+      if (current?.updated_at === item.updated_at) useStore.setState((state) => ({ items: state.items.map((candidate) => candidate.id === item.id ? { ...candidate, notificationIds } : candidate) }));
+      else await cancelNotifications(notificationIds);
     }
   }, [updateItem]);
 
@@ -330,8 +385,8 @@ function VoiceReminderApp() {
   }, [syncNativeCompletions]);
 
   useEffect(() => {
-    if (hasHydrated) void bootstrapSync();
-  }, [bootstrapSync, hasHydrated]);
+    if (hasHydrated) { void bootstrapSync(); void syncNativeCompletions(); }
+  }, [bootstrapSync, hasHydrated, syncNativeCompletions]);
 
   // Daily Budget account link (OAuth). Reflects whether this device holds a
   // valid grant; the connect flow hands off to the daily-budget app and back.
@@ -384,7 +439,10 @@ function VoiceReminderApp() {
       }
       if (action.snooze_minutes) patch.snooze_minutes = action.snooze_minutes;
       if (action.max_attempts) patch.max_attempts = action.max_attempts;
-      if (action.done != null) patch.done = action.done;
+      if (action.done != null) {
+        if (target.recurrence) Object.assign(patch, occurrencePatch(target, dateKey(new Date()), action.done ? 'done' : 'pending'));
+        else patch.done = action.done;
+      }
 
       const timingChanged =
         patch.start_at !== undefined ||
@@ -393,21 +451,46 @@ function VoiceReminderApp() {
         patch.remind_until_done !== undefined ||
         patch.snooze_minutes !== undefined ||
         patch.max_attempts !== undefined ||
-        patch.done !== undefined;
+        patch.done !== undefined || patch.details !== undefined;
       if (timingChanged) {
         await cancelNotifications(target.notificationIds);
         patch.notificationIds = await scheduleForItem({ ...target, ...patch });
       }
-      updateItem(target.id, patch);
+      await updateItem(target.id, patch);
     },
     [updateItem],
   );
 
   // Carry out every action in a plan, then speak one reply.
   const executePlan = useCallback(
-    async (p: BrainPlan, rawText: string) => {
-      const CREATE_TOOLS = ['create_reminder', 'create_event', 'create_todo', 'create_note'];
+    async (p: BrainPlan, rawText: string, allowConflicts = false) => {
+      const CREATE_TOOLS = ['create_reminder', 'create_event', 'create_todo', 'create_note', 'remember_entity', 'add_shopping'];
+      const executionUser = useStore.getState().userId;
+      const available = executionUser ? await useSpaces.getState().refresh().catch(() => []) : [];
+      if (useStore.getState().userId !== executionUser) throw new Error('Account changed. Please try again.');
+      const selected = executionUser ? usePreferences.getState().activeHouseholdId : null;
+      const scope = (action: BrainPlan['actions'][number]) => resolveSpace(action, selected, available);
       const snapshot = () => useStore.getState().items;
+      const scoped = (action: BrainPlan['actions'][number]) => itemsInSpace(snapshot(), scope(action));
+      validatePlanLinks(p.actions, snapshot(), scope);
+      // Validate every local action before any side effects.
+      for (const action of p.actions) {
+        if (CREATE_TOOLS.includes(action.tool) || ['query', 'update_item', 'delete_item', 'share_item', 'assign_item', 'set_occurrence', 'find_free_time'].includes(action.tool)) {
+          scope(action);
+          validateEntityLinks(action.entity_refs, scope(action), snapshot());
+          if (action.tool === 'remember_entity') {
+            if (!action.entity_kind) throw new Error('Please specify person, pet or place.');
+            const matches = scoped(action).filter((item) => item.details?.profile && (action.target_ref ? item.id === action.target_ref : item.title.trim().toLocaleLowerCase() === action.title.trim().toLocaleLowerCase()));
+            if (matches.length > 1 || (action.target_ref && !matches.length)) throw new Error('Please choose the person, pet or place in Settings first.');
+          }
+          if (action.tool === 'share_item' && (!scope(action) || !snapshot().some((item) => item.id === action.target_ref && !item.household_id))) {
+            throw new Error('Choose a personal item and a shared destination first.');
+          }
+          if (['update_item', 'delete_item', 'assign_item', 'set_occurrence'].includes(action.tool) && !scoped(action).some((item) => item.id === action.target_ref)) {
+            throw new Error('The item is not in the requested space. Select its space and try again.');
+          }
+        }
+      }
       const created: Item[] = [];
       let requestedSingleDeletes = 0;
       let completedSingleDeletes = 0;
@@ -421,7 +504,7 @@ function VoiceReminderApp() {
         }
         try {
           const summary = await fetchBudgetSummary();
-          return formatBudgetAnswer(summary, kind ?? 'summary');
+          return formatBudgetAnswer(summary, kind ?? 'summary', languageRef.current);
         } catch {
           return 'I could not reach Daily Budget. Please check the connection or that cloud sync is on.';
         }
@@ -505,51 +588,115 @@ function VoiceReminderApp() {
         }
       };
 
+      for (const action of p.actions) {
+        if (action.tool === 'assign_item') {
+          const target = scoped(action).find((item) => item.id === action.target_ref)!;
+          assignmentPatch(target, action.assignee_id, action.notify_user_ids, available.find((space) => space.id === scope(action))?.members ?? []);
+        }
+        if (action.tool === 'set_occurrence') occurrencePatch(scoped(action).find((item) => item.id === action.target_ref)!, action.occurrence_date ?? dateKey(new Date()), action.occurrence_status ?? 'done');
+        if (action.tool === 'find_free_time') freeSlots(scoped(action), new Date(action.datetime ?? ''), new Date(action.end_datetime ?? ''), action.duration_minutes ?? 60);
+        if (action.tool === 'set_preference') changeDefaults(usePreferences.getState().personalDefaults[executionUser ?? 'local'] ?? initialDefaults, action.preference_key ?? '', action.preference_value ?? null);
+        if (!allowConflicts && (action.tool === 'create_event' || action.tool === 'update_item') && action.datetime) {
+          const target = action.tool === 'update_item' ? scoped(action).find((item) => item.id === action.target_ref) : null;
+          if (target && target.type !== 'event') continue;
+          const from = new Date(action.datetime), until = action.end_datetime ? new Date(action.end_datetime) : new Date(from.getTime() + (action.all_day ? 86400000 : 3600000));
+          if (busySlots(scoped(action).filter((item) => item.id !== target?.id), from, until).length) {
+            conflictRef.current = { plan: p, text: rawText, userId: executionUser, space: selected };
+            const alternative = freeSlots(scoped(action).filter((item) => item.id !== target?.id), from, new Date(from.getTime() + 86400000), (until.getTime() - from.getTime()) / 60000)[0];
+            const label = alternative ? new Intl.DateTimeFormat(languageRef.current === 'th' ? 'th-TH' : 'en-US', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' }).format(new Date(alternative.start)) : '';
+            const question = languageRef.current === 'th' ? `เวลานี้มีนัดอยู่แล้ว ${label ? `ช่วงว่างถัดไปเริ่ม ${label} ` : ''}พูดยืนยันเพื่อนัดซ้อน หรือบอกเวลาใหม่` : `This overlaps an event. ${label ? `The next free slot starts ${label}. ` : ''}Say confirm to keep the overlap, or choose a different time.`;
+            setPlan({ ...p, actions: [], speak_back: question, needs_clarification: true, clarify_question: question }); say(question); return;
+          }
+        }
+      }
       const needsPerm = p.actions.some(
         (a) => CREATE_TOOLS.includes(a.tool) || a.tool === 'update_item',
       );
       if (needsPerm) await ensureNotifyPermission();
 
-      for (const action of p.actions) {
+      const createdByAction = new Map<number, Item>();
+      for (const [actionIndex, action] of p.actions.entries()) {
         if (CREATE_TOOLS.includes(action.tool)) {
           const item = actionToItem(
             action,
-            rawText,
+            scope(action) ? [action.title, action.body].filter(Boolean).join(". ") : rawText,
             defaultAlertMode,
-            userId ? activeHouseholdId : null,
+            scope(action),
           ); // keep the verbatim sentence
           if (!item) continue;
+          if (action.parent_ref) {
+            const actionMatch = action.parent_ref.match(/^action:(\d+)$/);
+            const parent = actionMatch ? createdByAction.get(Number(actionMatch[1]) - 1) : snapshot().find((item) => item.id === action.parent_ref);
+            if (!parent || !['event', 'todo'].includes(parent.type) || !parent.start_at || !item.start_at || (parent.household_id ?? null) !== scope(action)) throw new Error('The reminder needs a dated event or task in the same space.');
+            item.details = { ...item.details, parent_id: parent.id, reminder_offset_minutes: (Date.parse(item.start_at) - Date.parse(parent.start_at)) / 60000 };
+          }
           const ids = await scheduleForItem(item);
           const saved = { ...item, notificationIds: ids };
-          addItem(saved);
+          const existingProfiles = action.tool === 'remember_entity'
+            ? scoped(action).filter((candidate) => candidate.details?.profile && (action.target_ref ? candidate.id === action.target_ref : candidate.title.trim().toLocaleLowerCase() === action.title.trim().toLocaleLowerCase()))
+            : [];
+          if (existingProfiles.length > 1) throw new Error('More than one profile has this name. Edit it in Settings.');
+          if (existingProfiles[0]) {
+            const existing = existingProfiles[0];
+            saved.id = existing.id;
+            saved.created_at = existing.created_at;
+            saved.body = action.body ?? existing.body;
+            saved.details = { ...existing.details, ...saved.details };
+            await updateItem(existing.id, saved);
+          } else {
+            const duplicate = shoppingDuplicate(scoped(action), saved);
+            if (duplicate) {
+              saved.id = duplicate.id;
+              saved.created_at = duplicate.created_at;
+              saved.details = { ...duplicate.details, shopping: { ...saved.details!.shopping!, quantity: duplicate.details!.shopping!.quantity + saved.details!.shopping!.quantity } };
+              await updateItem(duplicate.id, saved);
+            } else addItem(saved);
+          }
+          if (action.tool === 'remember_entity' && action.aliases) usePreferences.getState().setEntityAliases(executionUser ?? 'local', saved.id, action.aliases);
           created.push(saved);
+          createdByAction.set(actionIndex, saved);
+        } else if (action.tool === 'set_preference') {
+          const owner = executionUser ?? 'local';
+          usePreferences.getState().setPersonalDefaults(owner, changeDefaults(usePreferences.getState().personalDefaults[owner] ?? initialDefaults, action.preference_key!, action.preference_value ?? null));
+          languageRef.current = replyLanguage(usePreferences.getState().personalDefaults[owner].responseLanguage, rawText);
+        } else if (action.tool === 'assign_item' || action.tool === 'set_occurrence') {
+          const target = scoped(action).find((item) => item.id === action.target_ref)!;
+          const patch = action.tool === 'assign_item' ? assignmentPatch(target, action.assignee_id, action.notify_user_ids, available.find((space) => space.id === scope(action))?.members ?? []) : occurrencePatch(target, action.occurrence_date ?? dateKey(new Date()), action.occurrence_status ?? 'done');
+          await cancelNotifications(target.notificationIds);
+          const notificationIds = await scheduleForItem({ ...target, ...patch });
+          await updateItem(target.id, { ...patch, notificationIds });
+        } else if (action.tool === 'share_item') {
+          const target = snapshot().find((item) => item.id === action.target_ref && !item.household_id);
+          if (!target) throw new Error('That personal item is no longer available.');
+          await updateItem(target.id, { household_id: scope(action), raw_text: [target.title, target.body].filter(Boolean).join('. '), details: { ...target.details, entity_ids: [], parent_id: undefined, reminder_offset_minutes: undefined } });
         } else if (action.tool === 'delete_item') {
           requestedSingleDeletes += 1;
-          const target = snapshot().find((i) => i.id === action.target_ref);
+          const target = scoped(action).find((i) => i.id === action.target_ref);
           if (target) {
             await cancelNotifications(target.notificationIds);
             removeItem(target.id);
             completedSingleDeletes += 1;
           }
         } else if (action.tool === 'update_item') {
-          const target = snapshot().find((i) => i.id === action.target_ref);
+          const target = scoped(action).find((i) => i.id === action.target_ref);
           if (target) await applyUpdate(target, action);
         }
       }
 
       // Query answer is data-driven → wins over the plan's canned reply.
       const queryAction = p.actions.find((a) => a.tool === 'query');
-      let answer = p.speak_back;
+      let answer = p.actions.some((action) => action.tool === 'help') ? capabilityAnswer(helpOptionsRef.current, languageRef.current) : p.speak_back;
       if (requestedSingleDeletes > 0 && completedSingleDeletes === 0) {
         answer = 'I could not find that item. Try saying its name or list your items first.';
       } else if (completedSingleDeletes > 0) {
         answer = `Deleted ${completedSingleDeletes} ${completedSingleDeletes === 1 ? 'item' : 'items'}.`;
       }
       if (queryAction) {
-        answer =
-          queryAction.query_kind === 'search'
-            ? await searchMemory(queryAction.title || rawText, snapshot())
-            : answerQuery(snapshot(), queryAction);
+        if (queryAction.query_kind === 'search') {
+          const result = await searchMemory(queryAction.title || rawText, scoped(queryAction), languageRef.current);
+          if (useStore.getState().userId !== executionUser) throw new Error('Account changed. Please ask again.');
+          answer = result.answer; setMemorySources(result.sources);
+        } else answer = answerQuery(scoped(queryAction), queryAction, new Date(), languageRef.current);
       }
 
       // ── daily-budget actions (REST bridge) ────────────────────────────────
@@ -561,7 +708,8 @@ function VoiceReminderApp() {
 
       const budgetQuery = p.actions.find((a) => a.tool === 'query_budget');
       if (budgetQuery) {
-        answer = await answerBudgetQuery(budgetQuery.budget_kind);
+        const budgetAnswer = await answerBudgetQuery(budgetQuery.budget_kind);
+        answer = queryAction ? `${answer} ${budgetAnswer}` : budgetAnswer;
       }
 
       const expense = p.actions.find((a) => a.tool === 'record_expense' && a.amount != null);
@@ -580,6 +728,20 @@ function VoiceReminderApp() {
         answer = await editExpenseViaApi(editExpense);
       }
 
+      const free = p.actions.find((action) => action.tool === 'find_free_time');
+      if (free) {
+        const slots = freeSlots(scoped(free), new Date(free.datetime ?? ''), new Date(free.end_datetime ?? ''), free.duration_minutes ?? 60);
+        const format = (date: string) => new Intl.DateTimeFormat(languageRef.current === 'th' ? 'th-TH' : 'en-US', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' }).format(new Date(date));
+        answer = slots.length ? `Available: ${slots.slice(0,5).map((slot) => `${format(slot.start)} – ${format(slot.end)}`).join('; ')}` : 'There are no free slots in that range.';
+      }
+      if (p.actions.some((a) => a.tool === 'set_preference')) answer = 'Preferences saved.';
+      if (p.actions.some((a) => a.tool === 'assign_item')) answer = 'Assignment saved.';
+      if (p.actions.some((a) => a.tool === 'set_occurrence')) answer = 'Occurrence saved.';
+      const sharedActions = p.actions.filter((action) => action.tool === 'share_item');
+      if (sharedActions.length) answer = `Shared in ${[...new Set(sharedActions.map((action) => spaceLabel(scope(action), available)))].join(', ')}.`;
+      if (created.length) answer += ` Saved in ${[...new Set(created.map((item) => spaceLabel(item.household_id, available)))].join(', ')}.`;
+      answer = localizeReply(answer, languageRef.current);
+      setPlan({ ...p, speak_back: answer });
       say(answer);
 
       if (deferredDeepLinkExpense) {
@@ -595,21 +757,30 @@ function VoiceReminderApp() {
       // Refresh what "อันแรก / อันเมื่อกี้" points at for the next turn.
       let refItems: Item[];
       if (queryAction && queryAction.query_kind !== 'search') {
-        refItems = queryItems(snapshot(), queryAction);
+        refItems = queryItems(scoped(queryAction), queryAction);
       } else if (created.length) {
         refItems = created;
       } else {
-        refItems = [...snapshot()].sort((a, b) => b.created_at.localeCompare(a.created_at));
+        refItems = [...itemsInSpace(snapshot(), selected)].sort((a, b) => b.created_at.localeCompare(a.created_at));
       }
       contextRef.current = { referents: toReferents(refItems), lastUtterance: rawText };
     },
-    [activeHouseholdId, addItem, applyUpdate, defaultAlertMode, removeItem, say, userId],
+    [activeHouseholdId, addItem, applyUpdate, defaultAlertMode, removeItem, say, updateItem, userId],
   );
 
   const executeConfirmedBulkDelete = useCallback(
     async (pending: PendingBulkDelete) => {
       const ids = new Set(pending.itemIds);
-      const targets = useStore.getState().items.filter((item) => ids.has(item.id));
+      if (useStore.getState().userId !== pending.userId) throw new Error('Account changed. Please request deletion again.');
+      const available = pending.userId ? await useSpaces.getState().refresh().catch(() => []) : [];
+      if (useStore.getState().userId !== pending.userId) throw new Error('Account changed. Please request deletion again.');
+      const targets = useStore.getState().items.filter((item) => ids.has(item.id)
+        && (item.household_id ?? null) === pending.scopes[item.id]
+        && (!item.household_id || available.some((space) => space.id === item.household_id)));
+      const targetIds = new Set(targets.map((item) => item.id));
+      if (targets.some((item) => linkedChildren(useStore.getState().items, item).some((child) => !targetIds.has(child.id)))) {
+        throw new Error('Linked reminders changed. Please request deletion again.');
+      }
       await Promise.all(targets.map((item) => cancelNotifications(item.notificationIds)));
       for (const item of targets) removeItem(item.id);
       const answer = targets.length
@@ -644,6 +815,18 @@ function VoiceReminderApp() {
         return;
       }
 
+      const currentDefaults = usePreferences.getState().personalDefaults[useStore.getState().userId ?? 'local'] ?? initialDefaults;
+      languageRef.current = replyLanguage(currentDefaults.responseLanguage, result.text);
+      setMemorySources([]);
+      const conflict = conflictRef.current;
+      if (conflict) {
+        conflictRef.current = null;
+        if (isDeleteConfirmation(result.text) && conflict.userId === useStore.getState().userId && conflict.space === usePreferences.getState().activeHouseholdId) {
+          setThinking(true); void executePlan(conflict.plan, conflict.text, true).catch((e) => setError(String(e))).finally(() => setThinking(false)); return;
+        }
+        if (isDeleteCancellation(result.text)) { say(languageRef.current === 'th' ? 'ยกเลิกแล้ว' : 'Cancelled.'); return; }
+        contextRef.current.pending = conflict.text;
+      }
       setLast(result);
       setPlan(null);
       handsFreePausedRef.current = false;
@@ -676,7 +859,15 @@ function VoiceReminderApp() {
         return;
       }
 
-      const currentItems = useStore.getState().items;
+      if (isHelpQuestion(result.text)) {
+        const answer = capabilityAnswer(helpOptionsRef.current, languageRef.current);
+        setPlan({ actions: [], speak_back: answer, needs_clarification: false, clarify_question: null });
+        say(answer);
+        return;
+      }
+      const requestUser = useStore.getState().userId;
+      const requestSpace = requestUser ? usePreferences.getState().activeHouseholdId : null;
+      const currentItems = itemsInSpace(useStore.getState().items, requestSpace);
       const localDelete = planLocalDelete(result.text, currentItems, contextRef.current.referents);
       if (!localDelete && !isGroqConfigured()) {
         say(`You said: ${result.text}`);
@@ -684,17 +875,27 @@ function VoiceReminderApp() {
       }
 
       setThinking(true);
-      const inventory = toReferents(currentItems, 200);
-      const planning = localDelete
-        ? Promise.resolve(localDelete)
-        : planActions(result.text, new Date(), { ...contextRef.current, inventory });
+      const planning = (async () => {
+        const available = requestUser ? await useSpaces.getState().refresh().catch(() => []) : [];
+        if (useStore.getState().userId !== requestUser) throw new Error('Account changed. Please try again.');
+        resolveSpace({}, requestSpace, available);
+        if (localDelete) return localDelete;
+        const inventory = toReferents(useStore.getState().items.filter((item) => !item.household_id || available.some((space) => space.id === item.household_id)), 200).map((ref) => {
+          const item = useStore.getState().items.find((item) => item.id === ref.ref);
+          return { ...ref, label: `${ref.label} [space_id=${item?.household_id ?? 'personal'}]` };
+        });
+        return planActions(result.text, new Date(), { ...contextRef.current, inventory, spaces: available.map(({ id, name, aliases }) => ({ id, name, aliases })), selectedSpaceId: requestSpace, language: languageRef.current, defaults: currentDefaults, currentUserId: requestUser, members: available.map((space) => ({ space_id: space.id, members: space.members ?? [] })), capabilities: capabilityAnswer(helpOptionsRef.current, languageRef.current), entities: entityContext(useStore.getState().items.filter((item) => !item.household_id || available.some((space) => space.id === item.household_id)), usePreferences.getState().entityAliases[requestUser ?? 'local']) });
+      })();
       planning
         .then(async (parsed) => {
-          const currentItems = useStore.getState().items;
+          if (useStore.getState().userId !== requestUser || (requestUser ? usePreferences.getState().activeHouseholdId : null) !== requestSpace) throw new Error('Account or space changed. Please try again.');
+          const available = useSpaces.getState().spaces;
+          const allItems = useStore.getState().items.filter((item) => !item.household_id || available.some((space) => space.id === item.household_id));
           const resolvedPlan: BrainPlan = {
             ...parsed,
             actions: parsed.actions.map((action) => {
               if (action.tool !== 'delete_item') return action;
+              const currentItems = itemsInSpace(allItems, resolveSpace(action, requestSpace, available));
               const refExists = currentItems.some((item) => item.id === action.target_ref);
               if (refExists) return action;
               const fallback = resolveDeleteTarget(action.title, currentItems);
@@ -704,7 +905,7 @@ function VoiceReminderApp() {
           setPlan(resolvedPlan);
           // Not confident enough — ask instead of guessing; next turn completes it.
           if (resolvedPlan.needs_clarification && resolvedPlan.clarify_question) {
-            contextRef.current = { ...contextRef.current, pending: result.text };
+            contextRef.current = { ...contextRef.current, pending: [contextRef.current.pending, result.text].filter(Boolean).join("; ") };
             say(resolvedPlan.clarify_question);
             return;
           }
@@ -713,15 +914,16 @@ function VoiceReminderApp() {
           const enumeratedDeletes = resolvedPlan.actions.filter(
             (action) => action.tool === 'delete_item' && !!action.target_ref,
           );
-          const candidates = bulkAction
-            ? itemsForDeleteScope(useStore.getState().items, bulkAction.delete_scope)
+          const directCandidates = bulkAction
+            ? itemsForDeleteScope(itemsInSpace(allItems, resolveSpace(bulkAction, requestSpace, available)), bulkAction.delete_scope)
             : enumeratedDeletes.length > 1
               ? useStore
                   .getState()
                   .items.filter((item) =>
-                    enumeratedDeletes.some((action) => action.target_ref === item.id),
+                    enumeratedDeletes.some((action) => action.target_ref === item.id && (item.household_id ?? null) === resolveSpace(action, requestSpace, available)),
                   )
               : [];
+          const candidates = [...new Map(directCandidates.flatMap((item) => [item, ...linkedChildren(allItems, item)]).map((item) => [item.id, item])).values()];
           if (bulkAction || enumeratedDeletes.length > 1) {
             if (!candidates.length) {
               const answer = bulkAction?.delete_scope
@@ -738,6 +940,8 @@ function VoiceReminderApp() {
             pendingBulkDeleteRef.current = {
               itemIds: candidates.map((item) => item.id),
               description,
+              userId: requestUser,
+              scopes: Object.fromEntries(candidates.map((item) => [item.id, item.household_id ?? null])),
             };
             setPlan({ ...resolvedPlan, speak_back: question, needs_clarification: true, clarify_question: question });
             say(question);
@@ -790,7 +994,7 @@ function VoiceReminderApp() {
       await cancelNotifications(item.notificationIds);
       const next = { ...item, ...patch };
       const notificationIds = await scheduleForItem(next);
-      updateItem(item.id, { ...patch, notificationIds });
+      await updateItem(item.id, { ...patch, notificationIds });
       setEditingItem(null);
     },
     [editingItem, updateItem],
@@ -808,7 +1012,7 @@ function VoiceReminderApp() {
       await cancelNotifications(item.notificationIds);
       const next = { ...item, ...patch };
       const notificationIds = await scheduleForItem(next);
-      updateItem(item.id, { ...patch, notificationIds });
+      await updateItem(item.id, { ...patch, notificationIds });
     },
     [updateItem],
   );
@@ -821,22 +1025,28 @@ function VoiceReminderApp() {
       await cancelNotifications(item.notificationIds);
       const next = { ...item, snooze_minutes };
       const notificationIds = await scheduleForItem(next);
-      updateItem(item.id, { snooze_minutes, notificationIds });
+      await updateItem(item.id, { snooze_minutes, notificationIds });
     },
     [updateItem],
   );
 
   const handleToggleDone = useCallback(
-    async (item: Item) => {
+    async (item: Item, occurrence = dateKey(new Date())) => {
+      if (item.recurrence) {
+        if (!occursOn(item, new Date(`${occurrence}T12:00:00+07:00`))) { setError('วันนี้ไม่มีรอบของรายการนี้ เลือกวันที่ใน Calendar หรือบอกวันที่ด้วยเสียง'); return; }
+        const patch = occurrencePatch(item, occurrence, item.details?.occurrences?.[occurrence] === 'done' ? 'pending' : 'done');
+        await cancelNotifications(item.notificationIds);
+        await updateItem(item.id, { ...patch, notificationIds: await scheduleForItem({ ...item, ...patch }) }); return;
+      }
       if (!item.done) {
         await cancelNotifications(item.notificationIds);
-        updateItem(item.id, { done: true, notificationIds: [] });
+        await updateItem(item.id, { done: true, notificationIds: [] });
         return;
       }
       await ensureNotifyPermission();
       const next = { ...item, done: false };
       const notificationIds = await scheduleForItem(next);
-      updateItem(item.id, { done: false, notificationIds });
+      await updateItem(item.id, { done: false, notificationIds });
     },
     [updateItem],
   );
@@ -957,7 +1167,7 @@ function VoiceReminderApp() {
           : handsFreeEnabled && handsFreePaused
             ? 'HANDS-FREE PAUSED'
             : 'READY FOR COMMAND';
-  const visibleItems = items.filter((item) => item.id !== pendingDelete?.id);
+  const visibleItems = itemsInSpace(items, userId ? activeHouseholdId : null).filter((item) => item.id !== pendingDelete?.id);
   const recentItems = visibleItems.slice(0, 3);
   const dayItems = visibleItems
     .filter((item) => itemCoversDay(item, selectedDate))
@@ -972,8 +1182,16 @@ function VoiceReminderApp() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
+          {activeTab !== 'settings' && <SpacePicker disabled={thinking || listening || busy} />}
           {activeTab === 'talk' && (
             <>
+              <CapabilityGuide options={helpOptions} disabled={thinking || busy} onExample={(text) => { void cancelListeningRef.current(); say(text, config.locale); }} onSpeak={() => {
+                setError(null);
+                void cancelListeningRef.current();
+                const answer = capabilityAnswer(helpOptionsRef.current, languageRef.current);
+                setPlan({ actions: [], speak_back: answer, needs_clarification: false, clarify_question: null });
+                say(answer);
+              }} />
               <View style={styles.hero}>
                 <View style={styles.coreStatusSlot}>
                   {(listening || busy || thinking || speaking || handsFreeEnabled) && (
@@ -1032,6 +1250,7 @@ function VoiceReminderApp() {
                 )}
               </View>
 
+              {memorySources.map((source) => <Pressable key={source.id} accessibilityRole="button" onPress={() => { const current = useStore.getState().items.find((item) => item.id === source.id); if (current) setEditingItem(current); }}><Text style={{ color: colors.primary, padding: 12 }}>📖 {source.title} · {dateKey(source.start_at ?? source.created_at)}</Text></Pressable>)}
               <View style={styles.conversation}>
                 {!last && !partial && !thinking && !plan && (
                   <AssistantMessage text="What would you like me to remember?" />
@@ -1092,8 +1311,8 @@ function VoiceReminderApp() {
                       ]}
                     >
                       {plan.needs_clarification && plan.clarify_question
-                        ? `❓ ${plan.clarify_question}`
-                        : plan.speak_back}
+                        ? `❓ ${localizeReply(plan.clarify_question, languageRef.current)}`
+                        : localizeReply(plan.speak_back, languageRef.current)}
                     </Text>
                   </View>
 
@@ -1218,7 +1437,8 @@ function VoiceReminderApp() {
                     <ItemRow
                       key={item.id}
                       item={item}
-                      onToggle={() => void handleToggleDone(item)}
+                      occurrenceDay={selectedDate}
+                      onToggle={() => void handleToggleDone(item, selectedDate)}
                       onAlertModeChange={() => void handleAlertModeChange(item)}
                       onSnoozeMinutesChange={() => void handleSnoozeMinutesChange(item)}
                       onEdit={() => setEditingItem(item)}
@@ -1241,6 +1461,12 @@ function VoiceReminderApp() {
 
               <Text style={styles.settingsSection}>Account</Text>
               <CloudSyncPanel autoOpen={!!pendingHouseholdInviteCode && !userId} />
+
+              <Text style={styles.settingsSection}>Assistant</Text>
+              <PersonalDefaultsPanel />
+
+              <Text style={styles.settingsSection}>People & places</Text>
+              <KnowledgePanel />
 
               <Text style={styles.settingsSection}>Alerts</Text>
               <View style={styles.settingsGroup}>
@@ -1277,6 +1503,8 @@ function VoiceReminderApp() {
                   })}
                 </View>
               </View>
+
+              <WebPushPanel />
 
               <Text style={styles.settingsSection}>Voice</Text>
               <View style={styles.settingsGroup}>
@@ -1467,6 +1695,14 @@ function VoiceReminderApp() {
           <BottomNav active={activeTab} onChange={setActiveTab} itemCount={visibleItems.length} />
         </SafeAreaView>
         <EditItemModal
+          extra={editingItem && <ItemActionsPanel item={items.find((i) => i.id === editingItem.id) ?? editingItem} members={useSpaces.getState().spaces.find((space) => space.id === editingItem.household_id)?.members ?? []}
+            onAssignment={(assignee,recipients) => { void (async () => {
+              const item = useStore.getState().items.find((i) => i.id === editingItem.id)!;
+              const spaces = await useSpaces.getState().refresh();
+              const patch = assignmentPatch(item, assignee, recipients, spaces.find((s) => s.id === item.household_id)?.members ?? []);
+              await cancelNotifications(item.notificationIds); await updateItem(item.id, { ...patch, notificationIds: await scheduleForItem({ ...item,...patch }) });
+            })().catch((e) => setError(String(e))); }}
+            onOccurrence={(status) => { void (async () => { const item = useStore.getState().items.find((i) => i.id === editingItem.id)!; const patch = occurrencePatch(item, dateKey(new Date()), status); await cancelNotifications(item.notificationIds); await updateItem(item.id, { ...patch, notificationIds: await scheduleForItem({ ...item, ...patch }) }); })().catch((e) => setError(String(e))); }} />}
           item={editingItem}
           onClose={() => setEditingItem(null)}
           onSave={(patch) => void handleSaveEdit(patch)}
@@ -1800,11 +2036,7 @@ const TYPE_META: Record<Item['type'], { icon: IoniconName; label: string }> = {
 /** True when a dated item falls on `day` ('YYYY-MM-DD', Bangkok) — matching its
  *  start day, or any day inside its start–end range. Undated notes never match. */
 function itemCoversDay(item: Item, day: string): boolean {
-  if (!item.start_at) return false;
-  const start = bkkDateStr(item.start_at);
-  if (!item.end_at) return start === day;
-  const end = bkkDateStr(item.end_at);
-  return day >= start && day <= (end >= start ? end : start);
+  return occursOn(item, new Date(`${day}T12:00:00+07:00`));
 }
 
 /** "Today", "Tomorrow", or "Wed, 10 Sep 2026" for the day-list heading. */
@@ -1846,6 +2078,7 @@ function toReferents(items: Item[], limit = 8): Referent[] {
 
 function ItemRow({
   item,
+  occurrenceDay = dateKey(new Date()),
   onToggle,
   onAlertModeChange,
   onSnoozeMinutesChange,
@@ -1853,6 +2086,7 @@ function ItemRow({
   onDelete,
 }: {
   item: Item;
+  occurrenceDay?: string;
   onToggle: () => void;
   onAlertModeChange: () => void;
   onSnoozeMinutesChange: () => void;
@@ -1866,6 +2100,8 @@ function ItemRow({
     .filter(Boolean)
     .join(' · ');
   const meta = TYPE_META[item.type];
+  const occurrenceStatus = item.recurrence ? item.details?.occurrences?.[occurrenceDay] : undefined;
+  const checked = item.done || occurrenceStatus === 'done';
 
   return (
     <SwipeableRow onDelete={onDelete}>
@@ -1876,30 +2112,32 @@ function ItemRow({
         onPress={onEdit}
         style={({ pressed }) => [
           styles.itemRow,
-          item.done && styles.itemRowDone,
+          checked && styles.itemRowDone,
           pressed && styles.itemRowPressed,
         ]}
       >
         <Pressable
-          accessibilityLabel={item.done ? `Mark ${item.title} as not done` : `Mark ${item.title} as done`}
+          accessibilityLabel={checked ? `Mark ${item.title} as not done` : `Mark ${item.title} as done`}
           accessibilityRole="checkbox"
-          accessibilityState={{ checked: item.done }}
+          accessibilityState={{ checked }}
           hitSlop={10}
           onPress={onToggle}
-          style={[styles.itemIcon, item.done && styles.itemIconDone]}
+          style={[styles.itemIcon, checked && styles.itemIconDone]}
         >
           <Ionicons
-            name={item.done ? 'checkmark' : meta.icon}
+            name={checked ? 'checkmark' : meta.icon}
             size={18}
-            color={item.done ? colors.success : colors.primaryBright}
+            color={checked ? colors.success : colors.primaryBright}
           />
         </Pressable>
         <View style={styles.itemBody}>
           <View style={styles.itemTypeRow}>
             <Text style={styles.itemType}>{meta.label}</Text>
-            {!!item.household_id && <Text style={styles.sharedBadge}>SHARED</Text>}
+            <ItemSpaceBadge spaceId={item.household_id} />
+            {occurrenceStatus && <Text style={styles.sharedBadge}>{occurrenceDay} · {occurrenceStatus === 'done' ? 'ทำแล้ว' : 'ข้าม'}</Text>}
+            {item.details?.shopping && <Text style={styles.sharedBadge}>{item.details.shopping.list} · {item.details.shopping.quantity} {item.details.shopping.unit}</Text>}
           </View>
-          <Text style={[styles.itemTitle, item.done && styles.itemTitleDone]} numberOfLines={1}>
+          <Text style={[styles.itemTitle, checked && styles.itemTitleDone]} numberOfLines={1}>
             {item.title}
           </Text>
           {!!detail && <Text style={styles.itemSub}>{detail}</Text>}
@@ -2438,3 +2676,8 @@ const styles = StyleSheet.create({
   navCount: { position: 'absolute', right: -5, top: -5, minWidth: 17, height: 17, borderRadius: 9, backgroundColor: colors.danger, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 },
   navCountText: { color: '#fff', fontSize: 8, fontWeight: '900' },
 });
+
+function ItemSpaceBadge({ spaceId }: { spaceId?: string | null }) {
+  const spaces = useSpaces((state) => state.spaces);
+  return <Text style={styles.sharedBadge}>{spaceLabel(spaceId, spaces)}</Text>;
+}

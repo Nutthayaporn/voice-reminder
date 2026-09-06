@@ -141,7 +141,16 @@ function baht(n: number): string {
  * Compose a short spoken answer from a summary, shaped by what was asked.
  * English to match the rest of the app's spoken replies (see brain/prompt.ts).
  */
-export function formatBudgetAnswer(s: BudgetSummary, kind: BudgetKind): string {
+export function formatBudgetAnswer(s: BudgetSummary, kind: BudgetKind, language: 'th' | 'en' = 'en'): string {
+  if (language === 'th') {
+    const amount = (n: number) => `${Math.round(Math.abs(n)).toLocaleString('th-TH')} บาท`;
+    if (s.budget <= 0) return `ยังไม่ได้ตั้งงบรายเดือน เดือนนี้ใช้ไป ${amount(s.spent)} วันนี้ใช้ไป ${amount(s.todaySpent)}`;
+    const remaining = s.remaining < 0 ? `เกินงบแล้ว ${amount(s.remaining)}` : `เหลืองบ ${amount(s.remaining)} เฉลี่ยใช้ได้วันละ ${amount(s.availablePerRemainingDay)}`;
+    if (kind === 'today') return `วันนี้ใช้ไป ${amount(s.todaySpent)} เป้าต่อวัน ${amount(s.baselineDailyBudget)} ${remaining}`;
+    if (kind === 'remaining') return `${remaining} เหลืออีก ${s.daysLeftInclToday} วันในเดือนนี้`;
+    if (kind === 'status') return `เดือนนี้ใช้ไป ${amount(s.spent)} จากงบ ${amount(s.budget)} ${remaining}`;
+    return `เดือนนี้ใช้ไป ${amount(s.spent)} จากงบ ${amount(s.budget)} วันนี้ ${amount(s.todaySpent)} ${remaining} หากใช้ในอัตรานี้คาดว่าจะ${s.projectedOverUnder > 0 ? 'เกินงบ' : 'เหลืองบ'} ${amount(s.projectedOverUnder)}`;
+  }
   if (s.budget <= 0) {
     return `No monthly budget is set. So far this month you have spent ${baht(s.spent)}${
       s.todaySpent > 0 ? `, ${baht(s.todaySpent)} of it today` : ''

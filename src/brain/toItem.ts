@@ -9,6 +9,8 @@ const TOOL_TO_TYPE: Record<string, ItemType> = {
   create_event: 'event',
   create_todo: 'todo',
   create_note: 'note',
+  remember_entity: 'note',
+  add_shopping: 'todo',
 };
 
 /**
@@ -30,6 +32,7 @@ export function actionToItem(
     id: makeId(),
     household_id: householdId,
     type,
+    details: { ...(a.tool === 'add_shopping' ? { shopping: { list: a.list_name || 'Shopping', quantity: a.quantity ?? 1, unit: a.unit ?? '' } } : {}), ...(a.entity_kind && a.tool === 'remember_entity' ? { profile: { kind: a.entity_kind } } : {}), ...(a.entity_refs?.length ? { entity_ids: a.entity_refs } : {}) },
     title: a.title,
     body: a.body,
     start_at: a.datetime,

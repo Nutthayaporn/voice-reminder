@@ -8,6 +8,9 @@ import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { SchedulableTriggerInputTypes } from 'expo-notifications';
 
+import { receivesAlert } from '../domain/assignment';
+import { alertViewer } from './audience';
+import { occurrenceDates, dateKey } from '../domain/recurrence';
 import type { Item } from '../store/types';
 import { cancelNativeAlarm, scheduleNativeAlarm } from './nativeAlarm';
 
@@ -42,10 +45,18 @@ function bkkParts(iso: string): Parts {
 
 /** Schedule notifications for an item; returns the scheduled ids (may be []). */
 export async function scheduleForItem(item: Item): Promise<string[]> {
-  if (Platform.OS === 'web') return [];
+  if (Platform.OS === 'web' || !receivesAlert(item, alertViewer())) return [];
   // Notes never alarm; anything without a time can't be scheduled.
   if (item.done || item.type === 'note' || !item.start_at) return [];
 
+  if (item.recurrence && (Object.keys(item.details?.occurrences ?? {}).length || item.recurrence.interval > 1)) {
+    const now = new Date();
+    const dated = item.all_day ? { ...item, start_at: `${dateKey(item.start_at)}T08:00:00+07:00` } : item;
+    const dates = occurrenceDates(dated, now, new Date(now.getTime() + 3659 * 86400000)).slice(0, 8);
+    const ids: string[] = [];
+    for (const date of dates) ids.push(...await scheduleForItem({ ...item, id: `${item.id}~${date.toISOString()}`, start_at: date.toISOString(), recurrence: null, details: { ...item.details, occurrences: undefined } }));
+    return ids;
+  }
   if (item.type === 'reminder' && item.alert_mode === 'alarm') {
     const nativeId = await scheduleNativeAlarm(item);
     if (nativeId) return [`alarm:${nativeId}`];
@@ -127,7 +138,7 @@ function buildTriggers(
 
   if (!r) {
     // one-shot — skip if already in the past
-    const when = new Date(item.start_at as string);
+    const when = new Date(item.all_day ? `${dateKey(item.start_at!)}T08:00:00+07:00` : item.start_at as string);
     if (when.getTime() <= Date.now()) return [];
     return [{ type: SchedulableTriggerInputTypes.DATE, date: when, channelId }];
   }

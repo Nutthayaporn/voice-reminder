@@ -1,5 +1,5 @@
-// Web Push requires a separate service-worker/push subscription flow. Items
-// still save locally on web; scheduling remains a native-only capability.
+// Web Push delivery is scheduled server-side from synced items.
+// Browser subscriptions are managed separately in webPush.web.ts.
 
 import type { Item } from '../store/types';
 

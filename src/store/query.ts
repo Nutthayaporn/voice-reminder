@@ -2,6 +2,8 @@
 // reply. Phase 2 handles the common cases (today / this week); richer
 // natural-language search can grow here later.
 
+import { occursOn, dateKey } from '../domain/recurrence.ts';
+import { overdueItems, shoppingItems } from './planning.ts';
 import type { BrainAction } from '../brain/types';
 import type { Item } from './types';
 
@@ -23,7 +25,7 @@ function bkkWeekdayCode(d: Date): string {
   return map[wd] ?? 'MO';
 }
 
-function timeLabel(iso: string | null, allDay: boolean): string {
+function timeLabel(iso: string | null, allDay: boolean, language: 'th' | 'en' = 'en'): string {
   if (!iso || allDay) return '';
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
@@ -32,61 +34,27 @@ function timeLabel(iso: string | null, allDay: boolean): string {
     Number(parts.find((value) => value.type === type)?.value ?? 0);
   const hour24 = part('hour');
   const minute = part('minute');
+  if (language === 'th') return ` เวลา ${hour24}:${String(minute).padStart(2, '0')} นาฬิกา`;
   const period = hour24 >= 12 ? 'PM' : 'AM';
   const hour = hour24 % 12 || 12;
   return minute === 0 ? ` at ${hour} ${period}` : ` at ${hour} ${minute} ${period}`;
 }
 
 /** Does this item occur on `day` (a Bangkok calendar date)? */
-function occursOn(item: Item, day: Date): boolean {
-  const dayStr = bkkDateStr(day);
-
-  // Range events: start..end covers the day.
-  if (item.start_at && item.end_at) {
-    return bkkDateStr(item.start_at) <= dayStr && dayStr <= bkkDateStr(item.end_at);
-  }
-  if (!item.start_at) return false;
-
-  const startStr = bkkDateStr(item.start_at);
-  if (!item.recurrence) return startStr === dayStr;
-
-  // Recurring: only counts once it has started.
-  if (startStr > dayStr) return false;
-  const r = item.recurrence;
-  switch (r.freq) {
-    case 'daily':
-      return true;
-    case 'weekly': {
-      const code = bkkWeekdayCode(day);
-      return r.byday?.length
-        ? (r.byday as string[]).includes(code)
-        : bkkWeekdayCode(new Date(item.start_at)) === code;
-    }
-    case 'monthly':
-      // same day-of-month
-      return startStr.slice(8, 10) === dayStr.slice(8, 10);
-    case 'yearly':
-      // same month-day (MM-DD)
-      return startStr.slice(5) === dayStr.slice(5);
-    default:
-      return false;
-  }
-}
-
 /** Speech-friendly date+time label with no abbreviations. */
-function dayTimeLabel(iso: string | null, allDay: boolean): string {
+function dayTimeLabel(iso: string | null, allDay: boolean, language: 'th' | 'en' = 'en'): string {
   if (!iso) return '';
-  const date = new Intl.DateTimeFormat('en-US', {
+  const date = new Intl.DateTimeFormat(language === 'th' ? 'th-TH' : 'en-US', {
     timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long',
   }).format(new Date(iso));
-  return allDay ? `, ${date}` : `, ${date}${timeLabel(iso, false)}`;
+  return allDay ? `, ${date}` : `, ${date}${timeLabel(iso, false, language)}`;
 }
 
 /** The ordered set of items relevant "today" — dated occurrences + standing
  *  todos. Shared by the spoken answer and the multi-turn referent list so
  *  "อันแรก" points at exactly what was read out. */
 export function todayItems(items: Item[], now: Date = new Date()): Item[] {
-  const dated = items.filter((i) => !i.done && occursOn(i, now));
+  const dated = items.filter((i) => !i.done && !i.details?.occurrences?.[dateKey(now)] && occursOn(i, now));
   const undatedTodos = items.filter((i) => !i.done && i.type === 'todo' && !i.start_at);
   return [...dated, ...undatedTodos].sort((a, b) =>
     (a.start_at ?? '9999').localeCompare(b.start_at ?? '9999'),
@@ -97,14 +65,12 @@ export function todayItems(items: Item[], now: Date = new Date()): Item[] {
  *  day so recurring rules are honoured; deduped by id. */
 export function itemsInRange(items: Item[], start: Date, end: Date): Item[] {
   const out = new Map<string, Item>();
-  const day = new Date(start);
-  day.setHours(0, 0, 0, 0);
-  let guard = 0;
-  while (day.getTime() <= end.getTime() && guard++ < 90) {
+  const first = Date.parse(`${dateKey(start)}T00:00:00+07:00`);
+  for (let value = first, guard = 0; value <= end.getTime() && guard < 3660; value += 86400000, guard++) {
+    const day = new Date(value);
     for (const i of items) {
-      if (!i.done && occursOn(i, day)) out.set(i.id, i);
+      if (!i.done && !i.details?.occurrences?.[dateKey(day)] && occursOn(i, day)) out.set(i.id, i);
     }
-    day.setDate(day.getDate() + 1);
   }
   return [...out.values()].sort((a, b) =>
     (a.start_at ?? '9999').localeCompare(b.start_at ?? '9999'),
@@ -119,12 +85,15 @@ function isRangeQuery(action: BrainAction): boolean {
 /** The item set a query action refers to — shared by the answer and the
  *  multi-turn referent list so "อันแรก" matches what was read out. */
 export function queryItems(items: Item[], action: BrainAction, now: Date = new Date()): Item[] {
+  if (action.query_kind === 'shopping') return shoppingItems(items, action.list_name);
+  if (action.query_kind === 'overdue') return overdueItems(items, now);
+  if (action.query_kind === 'briefing') return [...new Map([...todayItems(items, now), ...overdueItems(items, now)].map((item) => [item.id, item])).values()];
   if (isRangeQuery(action)) {
     const start = new Date(action.datetime as string);
     let end = action.end_datetime ? new Date(action.end_datetime) : start;
     // A midnight end (e.g. "พรุ่งนี้" → next-day 00:00) would spill into the
     // following day; pull it back a second so the range ends the night before.
-    if (end.getSeconds() === 0 && end.getMinutes() === 0 && end.getHours() === 0 && end > start) {
+    if (new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(end) === '00:00:00' && end > start) {
       end = new Date(end.getTime() - 1000);
     }
     return itemsInRange(items, start, end);
@@ -133,7 +102,18 @@ export function queryItems(items: Item[], action: BrainAction, now: Date = new D
 }
 
 /** Compose a spoken answer for a query action. */
-export function answerQuery(items: Item[], action: BrainAction, now: Date = new Date()): string {
+export function answerQuery(items: Item[], action: BrainAction, now: Date = new Date(), language: 'th' | 'en' = 'en'): string {
+  if (action.query_kind === 'shopping') {
+    const shopping = shoppingItems(items, action.list_name);
+    return shopping.length ? `Still to buy: ${shopping.map((item) => `${item.title}, ${item.details!.shopping!.quantity} ${item.details!.shopping!.unit}`).join('; ')}.` : 'There is nothing left on this shopping list.';
+  }
+  if (action.query_kind === 'overdue') {
+    const overdue = overdueItems(items, now);
+    return overdue.length ? `Overdue: ${overdue.map((item) => item.title).join(', ')}.` : 'There are no overdue tasks.';
+  }
+  if (action.query_kind === 'briefing') {
+    return `${answerQuery(items, { ...action, query_kind: 'list_today' }, now, language)} ${answerQuery(items, { ...action, query_kind: 'overdue' }, now, language)}`;
+  }
   const range = isRangeQuery(action);
   const all = queryItems(items, action, now);
   if (all.length === 0) {
@@ -141,7 +121,7 @@ export function answerQuery(items: Item[], action: BrainAction, now: Date = new 
   }
   // Range spans days → show the date on each; today → time only.
   const lines = all
-    .map((i) => `${i.title}${range ? dayTimeLabel(i.start_at, i.all_day) : timeLabel(i.start_at, i.all_day)}`)
+    .map((i) => `${i.title}${range ? dayTimeLabel(i.start_at, i.all_day, language) : timeLabel(i.start_at, i.all_day, language)}`)
     .join(', ');
   return `${range ? 'You have' : 'Today you have'} ${all.length} ${all.length === 1 ? 'item' : 'items'}: ${lines}`;
 }

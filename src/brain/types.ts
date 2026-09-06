@@ -9,6 +9,14 @@
 // tool) so parsing/rendering/routing stay trivial and adding a field is cheap.
 
 export type ToolName =
+  | 'assign_item'
+  | 'set_occurrence'
+  | 'set_preference'
+  | 'find_free_time'
+  | 'add_shopping'
+  | 'remember_entity'
+  | 'share_item' // Move a personal item into an accessible shared space
+  | 'help'
   | 'create_reminder' // เตือน (มีเวลา, อาจซ้ำ)
   | 'create_event' // เหตุการณ์/นัด (อาจเป็นช่วง)
   | 'create_todo' // งานที่ต้องทำ (อาจไม่มีเวลา; อาจมี reminder แนบ)
@@ -37,11 +45,29 @@ export type AlertMode = 'notification' | 'alarm';
 /** Supported snooze choices shown in the app/native alarm UI. */
 export type SnoozeMinutes = 5 | 10 | 30;
 
-export type QueryKind = 'list_today' | 'list_range' | 'search' | null;
+export type QueryKind = 'list_today' | 'list_range' | 'search' | 'briefing' | 'overdue' | 'shopping' | null;
 export type DeleteScope = 'past' | 'done' | 'all' | null;
 
 export interface BrainAction {
   tool: ToolName;
+  /** null/omitted = selected space; personal = private; otherwise an accessible space ID. */
+  assignee_id?: string | null;
+  notify_user_ids?: string[] | null;
+  occurrence_date?: string | null;
+  occurrence_status?: 'done' | 'skipped' | 'pending' | null;
+  preference_key?: string | null;
+  preference_value?: string | null;
+  duration_minutes?: number | null;
+  list_name?: string | null;
+  quantity?: number | null;
+  unit?: string | null;
+  parent_ref?: string | null;
+  entity_kind?: 'person' | 'pet' | 'place' | null;
+  entity_refs?: string[] | null;
+  aliases?: string[] | null;
+  space_ref?: string | null;
+  /** Exact spoken space name, for ambiguity validation. */
+  space_name?: string | null;
   title: string;
   body: string | null;
   /** ISO 8601 (+07:00) — จุดเวลา/เวลาเริ่ม */
@@ -79,11 +105,11 @@ export interface BrainAction {
 export interface BrainPlan {
   /** ลำดับ action ที่จะทำ; ว่าง = ไม่มีคำสั่ง (คุยเล่น) */
   actions: BrainAction[];
-  /** A short English sentence spoken back to the user (for example, "Done."). */
+  /** A short sentence in the selected response language spoken back to the user (for example, "Done."). */
   speak_back: string;
   /** true เมื่อข้อมูลจำเป็นไม่ครบ/กำกวม — ต้องถามผู้ใช้ก่อน แทนการเดา */
   needs_clarification: boolean;
-  /** A short English question to ask when needs_clarification is true. */
+  /** A short question in the selected response language to ask when needs_clarification is true. */
   clarify_question: string | null;
 }
 
@@ -97,7 +123,15 @@ export interface Referent {
 
 /** Short-lived conversation memory passed into the next planning call. */
 export interface BrainContext {
+  language?: 'th' | 'en';
+  defaults?: import('../domain/defaults').PersonalDefaults;
+  currentUserId?: string | null;
+  members?: unknown[];
   referents: Referent[];
+  entities?: unknown[];
+  capabilities?: string;
+  spaces?: Array<{ id: string; name: string; aliases?: string[] }>;
+  selectedSpaceId?: string | null;
   /** Current store inventory, supplied every turn for commands by title. */
   inventory?: Referent[];
   lastUtterance?: string;

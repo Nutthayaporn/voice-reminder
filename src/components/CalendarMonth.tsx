@@ -7,6 +7,7 @@ import { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
+import { occursOn } from '../domain/recurrence';
 import type { Item } from '../store/types';
 import { bkkDateStr } from '../lib/date';
 import { colors, font, radius, spacing } from '../theme';
@@ -20,24 +21,6 @@ const MONTHS = [
 /** 'YYYY-MM-DD' for a calendar cell — plain string math, no timezone drift. */
 function ymd(year: number, month: number, day: number): string {
   return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-}
-
-/** Every Bangkok day an item touches: its start day, through its end day. */
-function itemDays(item: Item): string[] {
-  if (!item.start_at) return [];
-  const start = bkkDateStr(item.start_at);
-  if (!item.end_at) return [start];
-  const end = bkkDateStr(item.end_at);
-  if (end <= start) return [start];
-  const days: string[] = [];
-  const cursor = new Date(`${start}T00:00:00+07:00`);
-  const last = new Date(`${end}T00:00:00+07:00`);
-  // Cap the span so a stray multi-year end date can't build a huge array.
-  for (let i = 0; i <= 366 && cursor <= last; i += 1) {
-    days.push(bkkDateStr(cursor));
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-  return days;
 }
 
 export function CalendarMonth({
@@ -60,12 +43,14 @@ export function CalendarMonth({
   const counts = useMemo(() => {
     const map = new Map<string, number>();
     for (const item of items) {
-      for (const day of itemDays(item)) {
-        map.set(day, (map.get(day) ?? 0) + 1);
+      const length = new Date(Date.UTC(cursor.year, cursor.month + 1, 0)).getUTCDate();
+      for (let n = 1; n <= length; n++) {
+        const day = ymd(cursor.year, cursor.month, n);
+        if (occursOn(item, new Date(`${day}T12:00:00+07:00`))) map.set(day, (map.get(day) ?? 0) + 1);
       }
     }
     return map;
-  }, [items]);
+  }, [items, cursor]);
 
   const { year, month } = cursor;
   const firstWeekday = new Date(Date.UTC(year, month, 1)).getUTCDay();

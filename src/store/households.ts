@@ -3,6 +3,8 @@ import { supabase } from '../lib/supabase';
 export interface Household {
   id: string;
   name: string;
+  aliases?: string[];
+  members?: Array<{ user_id: string; name: string }>;
   invite_code: string;
   role: 'owner' | 'member';
   created_at: string;
@@ -52,4 +54,10 @@ export async function previewHouseholdInvite(
   const row = Array.isArray(data) ? data[0] : data;
   if (!row) throw new Error('Invite code not found.');
   return row as HouseholdInvitePreview;
+}
+
+export async function listMembers(spaceId: string): Promise<Array<{ user_id: string; name: string }>> {
+  const { data, error } = await must().rpc('list_space_members', { p_space_id: spaceId });
+  if (error) throw error;
+  return data ?? [];
 }

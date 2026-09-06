@@ -5,6 +5,7 @@
 // SECURITY: same caveat as cloudGroq — the key is bundled. Move server-side
 // (Supabase Edge Function) before shipping.
 
+import { entityKind } from '../knowledge/entities';
 import { config } from '../config';
 import { buildMessages } from './prompt';
 import type {
@@ -23,6 +24,10 @@ import type {
 const ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
 
 const VALID_TOOLS: ToolName[] = [
+  'help',
+  'share_item',
+  'remember_entity',
+  'add_shopping', 'assign_item', 'set_occurrence', 'set_preference', 'find_free_time',
   'create_reminder',
   'create_event',
   'create_todo',
@@ -107,6 +112,22 @@ function coerceAction(v: unknown): BrainAction | null {
   if (!VALID_TOOLS.includes(a.tool as ToolName)) return null;
   return {
     tool: a.tool as ToolName,
+    assignee_id: a.assignee_id === undefined ? undefined : strOrNull(a.assignee_id),
+    notify_user_ids: a.notify_user_ids === undefined ? undefined : a.notify_user_ids === null ? null : (stringArray(a.notify_user_ids) ?? []),
+    occurrence_date: strOrNull(a.occurrence_date),
+    occurrence_status: a.occurrence_status === 'done' || a.occurrence_status === 'skipped' || a.occurrence_status === 'pending' ? a.occurrence_status : null,
+    preference_key: strOrNull(a.preference_key),
+    preference_value: strOrNull(a.preference_value),
+    duration_minutes: typeof a.duration_minutes === 'number' ? a.duration_minutes : null,
+    list_name: strOrNull(a.list_name),
+    quantity: typeof a.quantity === 'number' && Number.isFinite(a.quantity) && a.quantity > 0 ? a.quantity : null,
+    unit: strOrNull(a.unit),
+    parent_ref: strOrNull(a.parent_ref),
+    entity_kind: entityKind(a.entity_kind),
+    entity_refs: stringArray(a.entity_refs),
+    aliases: stringArray(a.aliases),
+    space_ref: strOrNull(a.space_ref),
+    space_name: strOrNull(a.space_name),
     title: str(a.title),
     body: strOrNull(a.body),
     datetime: strOrNull(a.datetime),
@@ -143,7 +164,7 @@ function strOrNull(v: unknown): string | null {
   return s.length ? s : null;
 }
 function queryKind(v: unknown): QueryKind {
-  return v === 'list_today' || v === 'list_range' || v === 'search' ? v : null;
+  return v === 'list_today' || v === 'list_range' || v === 'search' || v === 'briefing' || v === 'overdue' || v === 'shopping' ? v : null;
 }
 function budgetKind(v: unknown): BudgetKind {
   return v === 'today' || v === 'remaining' || v === 'status' || v === 'summary' ? v : null;

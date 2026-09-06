@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   KeyboardAvoidingView,
   Modal,
@@ -26,7 +26,9 @@ export function EditItemModal({
   item,
   onClose,
   onSave,
+  extra,
 }: {
+  extra?: ReactNode;
   item: Item | null;
   onClose: () => void;
   onSave: (patch: ItemEditPatch) => void;
@@ -80,6 +82,7 @@ export function EditItemModal({
                 </Pressable>
               </View>
 
+              {extra}
               <View style={styles.field}>
                 <Text style={styles.label}>Title</Text>
                 <TextInput

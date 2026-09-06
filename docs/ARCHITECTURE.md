@@ -295,4 +295,28 @@ iOS ยังมี `dailybudget` ใน `LSApplicationQueriesSchemes` (app.json
   โค้ดสมมติเครื่องอยู่ Asia/Bangkok. ถ้าจะรองรับข้าม timezone ต้องแปลงเพิ่ม
 - native alarm: **ต้อง dev build**; ใน Expo Go จะ fallback ไป notification ตาม capability
 - บน web ใช้ platform files (`*.web.ts`) ตัด `expo-notifications` และ native file uploader
-  ออกจาก bundle; items บันทึกได้แต่ยังไม่มี Web Push
+  ออกจาก bundle; Web Push ใช้ service worker และ Supabase scheduler แยกจาก native
+
+
+## 8. Structured properties and scoped planning (2026-09-07)
+
+`items.details` is an additive JSON object persisted by `upsert_item_lww(p_details)`; omitted details from old clients preserve the existing value. Migration `20260907000000_item_details.sql` retains the existing item RLS policies. Details currently contain entity profiles, linked entity IDs, parent reminder links/offsets and shopping quantity/unit/list metadata.
+
+The planner receives current accessible Space IDs/names/aliases and entity profiles. Execution validates IDs, named-space ambiguity, link ownership and target scope before applying local actions. Private/shared visibility is per item; default queries and deletes use the selected Space. Space and entity aliases are account-keyed local preferences. Household RPC data is account-bound and refreshed before shared writes; missing membership fails closed.
+
+`linkedPatches` propagates parent date/completion/visibility changes to child reminders, and the store reschedules them before publishing updates. Parent deletion removes linked reminders in the same Space. Bulk confirmation stores the account, original item IDs and scopes; a changed linked family requires a new delete request.
+
+The help guide and help intent share `src/help/capabilities.ts`. Structured entity editing is in Settings → Memory. Daily briefing and shopping queries are deterministic; the LLM only selects their intent and parameters. See the rollout document for remaining features and verification limits.
+
+
+## Remaining rollout (7–13)
+
+- `items.details.assigned_to` is an optional member ID. `notify_user_ids=null/absent` means all current Space members, `[]` means nobody. Neither changes item visibility. Member lookup is membership-checked; scheduler rechecks recipients. Personal delivery belongs only to the record owner.
+- `details.occurrences` maps Bangkok `YYYY-MM-DD` to `done|skipped`; deleting a key reopens it. The series stays active. `src/domain/recurrence.ts` is shared with the Edge Function and handles interval-aware occurrence dates. Native exception schedules are rolling, up to eight occurrences in ten years; reopening replenishes the queue. Calendar cells now include recurring dates.
+- Account-local `personalDefaults` stores named times, optional lead minutes, and response language. Planner context supplies those values; deterministic replies and TTS follow the language. This is response localization, not a translation of all UI labels.
+- Memory retrieval scans full scoped history without a record-count cap, chunks oversized records, verifies source IDs against the provided records, and exposes source buttons. Failing any model request rejects the incomplete search. This is model-assisted evidence extraction, not a guarantee against model factual errors.
+- Busy/free interval calculation respects recurrence exceptions and overlapping durations. Voice event writes ask before conflicting with existing events in that scope; free-time responses only propose slots.
+- Web Push uses owner-RLS subscription rows and service-role-only delivery/test-claim RPCs. Direct default grants to anon/authenticated must be revoked explicitly. `web-push` retains Supabase JWT verification; cron additionally supplies a private scheduler header. Browser tests require a real authenticated JWT. Public VAPID configuration is fetched with the public anon JWT. VAPID private key and scheduler token never enter the client bundle.
+- Service worker displays generic lock-screen text and follows same-origin item links. The app opens only IDs present in its accessible cache. The scheduler checks a five-minute due window every minute and atomically leases sends, retries unsent leases after two minutes, and removes 404/410 subscriptions. A network/provider success followed by a database failure can still retry; service-worker tags coalesce duplicate presentation. There is no native-style repeating snooze on web.
+
+Server deployment and verification evidence are recorded in `docs/IMPLEMENTATION-ROADMAP.md`.

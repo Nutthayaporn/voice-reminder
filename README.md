@@ -146,8 +146,8 @@ npm run web:build    # export ไป dist/ + ผูก manifest/service worker
 ```
 
 เปิดด้วย Chrome หรือ Edge เพื่อใช้ Browser STT ภาษาไทย. PWA เปิด app shell
-ออฟไลน์ได้ และ items ยังเก็บแบบ local-first; การตั้งเตือนบน web ยังไม่รองรับ
-ในรอบนี้ (ต้องทำ Web Push แยก)
+ออฟไลน์ได้ และ items ยังเก็บแบบ local-first; เปิด Web Push ใน Settings หลังเข้าสู่ระบบ
+เพื่อรับการแจ้งเตือนจากรายการที่ซิงค์แล้ว แม้ปิดหน้าเว็บ (HTTPS/เบราว์เซอร์ที่รองรับ)
 
 ### เปิด Cloud Sync ข้ามเครื่อง (ไม่บังคับ)
 
@@ -203,3 +203,37 @@ Supabase Edge Function (แพตเทิร์นเดียวกับท�
 Expo SDK 57 (React Native 0.86) · TypeScript · React Native Web · expo-audio · expo-speech ·
 expo-speech-recognition · Groq Whisper — ล้อแนวเดียวกับโปรเจกต์พี่น้อง `daily-budget`
 เพื่อให้ integrate กันง่ายในอนาคต
+
+
+## Personal / Spaces, discovery and structured memory (2026-09-07)
+
+The Space selector above Talk, Items and Calendar controls the default capture and query scope. Say a real Space name (or your own alias), or explicitly say “จดส่วนตัวว่า…”. Names are resolved to accessible IDs; ambiguous or unavailable names do not silently select a destination. `share_item` moves an existing personal item into a named shared Space. Destructive bulk commands remain confirmed and scoped.
+
+Open **VORA ทำอะไรได้บ้าง** on Talk or ask by voice for the same capability catalog. The guide reflects web notification limitations and Daily Budget connection state. Example buttons speak examples without creating records.
+
+**Settings → Memory** manages people, pets and places. Canonical profiles live in their selected personal/Space scope. Your relationship aliases (for example “แม่”) remain account-specific on this device. Voice example: “โมจิคือแมวของเรา จดส่วนตัว”. Linked profile IDs must belong to the same Space as the item.
+
+New event/task reminders use a parent link: moving, completing or deleting the parent updates its linked reminders. “สรุปวันนี้ให้หน่อย” includes overdue tasks. Shopping commands such as “เพิ่มไข่สองแผงในลิสต์ซื้อของ” track quantity/unit and merge duplicates only within the same list and Space.
+
+Cloud deployments need `supabase/migrations/20260907000000_item_details.sql` (applied to the linked project during implementation). Existing clients preserve structured details when editing an item. The rollout and remaining work are tracked in [docs/IMPLEMENTATION-ROADMAP.md](docs/IMPLEMENTATION-ROADMAP.md).
+
+Validation: `npm run test:spaces`, `npm run test:knowledge`, `npm run test:planning`, plus existing delete/speech tests. Optional live prompt checks: `node --experimental-strip-types scripts/test-feature-brain.mts` (uses Groq quota and only synthetic fixtures).
+
+
+### Assignment, recurrence, preferences and recall
+
+Open an item's editor to choose its assignee and notification recipients. These settings do not change who can see the Space. Complete/skip/reopen one recurring occurrence by voice; today's controls and occurrence history are in the editor. Calendar completion applies to the selected date.
+
+Settings includes explicit time phrases (e.g. “ตอนเช้า = 07:30”), reminder lead minutes, and Thai/English/match-input responses. Preferences are account-keyed on the current device. Explicit times and “no reminder” override defaults. Full-history recall scans every accessible record in batches, returns source buttons, and fails visibly if a batch cannot be searched. Long histories use more model calls and may hit quota limits.
+
+Ask for a free interval within a window of up to 31 days. Voice event creation/moves check existing events in the selected Space and ask before an overlap, with a next-slot proposal. They do not inspect other private calendars or external calendars.
+
+### Web Push
+
+Settings → Web Push → enable → send test. On iPhone, install the PWA on the Home Screen first. This requires sign-in and synced items. Notification text is generic; tapping opens the original item. Explicit recipients are honored; personal items only go to their owner. Sign-out unsubscribes this browser before ending the session.
+
+The linked Supabase project now has `web-push` with platform JWT verification enabled, server-only VAPID secrets, Vault-backed scheduler credentials, and a minute cron. Delivery claims prevent concurrent duplicates, failed sends retry within the five-minute due window, and expired subscriptions are removed. Push delivery is best effort; it does not implement native alarm/snooze/until-done behavior. First-time setup for a new project: apply migrations, deploy `web-push`, then run `node --env-file=.env scripts/setup-web-push.mjs` after authorizing server setup. Never rerun initial setup to rotate existing VAPID keys.
+
+Native recurring notifications with exceptions or intervals greater than one use a rolling queue of up to eight upcoming occurrences (within ten years), refreshed when the app opens/resumes. Reopen the app periodically to replenish them; OS pending-notification limits still apply. Verify alarms on an actual device.
+
+Checks: `npx tsc --noEmit`, `npm run test:remaining`, existing regression scripts, and `npm run web:build`. `scripts/test-push-db.sql` validates claims and RLS in a rolled-back transaction. Live Groq checks use synthetic data and stop on HTTP 429. End-device push delivery still needs enabling a real browser subscription and pressing Send test.

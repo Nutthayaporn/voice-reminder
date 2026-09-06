@@ -1,0 +1,27 @@
+import assert from 'node:assert/strict';
+import { resolveSpace, itemsInSpace, spaceLabel } from '../src/spaces/routing.ts';
+import { capabilities, isHelpQuestion } from '../src/help/capabilities.ts';
+import { buildMessages } from '../src/brain/prompt.ts';
+import type { Item } from '../src/store/types.ts';
+
+const spaces = [{ id: 'id-a', name: 'ทีมดาวเหนือ', aliases: ['ทีมเรา'] }, { id: 'id-b', name: 'สวนมะนาว' }];
+assert.equal(resolveSpace({}, 'id-a', spaces), 'id-a');
+assert.equal(resolveSpace({ space_ref: 'personal' }, 'id-a', spaces), null);
+assert.equal(resolveSpace({ space_ref: 'id-b', space_name: 'สวนมะนาว' }, 'id-a', spaces), 'id-b');
+assert.equal(resolveSpace({ space_ref: 'id-a', space_name: 'ทีมเรา' }, null, spaces), 'id-a');
+assert.throws(() => resolveSpace({ space_ref: 'unknown' }, null, spaces));
+assert.throws(() => resolveSpace({}, 'revoked', spaces));
+assert.throws(() => resolveSpace({ space_ref: 'id-a', space_name: 'ทีมดาวเหนือ' }, null, [...spaces, { id: 'id-c', name: 'ทีมดาวเหนือ' }]));
+assert.throws(() => resolveSpace({ space_ref: 'id-a', space_name: 'ทีมเรา' }, null, [...spaces, { id: 'id-c', name: 'ทีมเรา' }]));
+const items = [{ id: 'private' }, { id: 'a', household_id: 'id-a' }, { id: 'b', household_id: 'id-b' }] as Item[];
+assert.deepEqual(itemsInSpace(items, null).map((i) => i.id), ['private']);
+assert.deepEqual(itemsInSpace(items, 'id-a').map((i) => i.id), ['a']);
+assert.equal(spaceLabel('id-a', spaces), 'ทีมดาวเหนือ');
+assert.equal(spaceLabel('id-a', [{ id: 'id-a', name: 'Renamed' }]), 'Renamed');
+const prompt = JSON.stringify(buildMessages('เพิ่มนมให้ทีมเรา', new Date('2026-09-07T00:00:00Z'), { referents: [], spaces, selectedSpaceId: 'id-b' }));
+assert.ok(prompt.includes('ทีมดาวเหนือ') && prompt.includes('ทีมเรา') && prompt.includes('id-b'));
+assert.ok(isHelpQuestion('แอปนี้ทำอะไรได้บ้าง'));
+assert.ok(!isHelpQuestion('จดว่าแอปนี้ทำอะไรได้บ้าง'));
+assert.ok(!capabilities({ web: true, budget: false, shared: false }).some((c) => c.id === 'budget'));
+assert.ok(capabilities({ web: false, budget: true, shared: true }).some((c) => c.id === 'budget'));
+console.log('✓ dynamic space IDs, aliases, ambiguity, invalid membership, scope isolation and capability help');

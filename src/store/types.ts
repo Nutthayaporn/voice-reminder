@@ -3,12 +3,14 @@
 // table, no separate holidays table). Mirrors the planned Supabase `items`
 // schema in docs/ARCHITECTURE.md so cloud sync later is a straight mapping.
 
+import type { ItemDetails } from './details';
 import type { AlertMode, Recurrence, SnoozeMinutes } from '../brain/types';
 
 export type ItemType = 'reminder' | 'event' | 'todo' | 'note';
 
 export interface Item {
   id: string;
+  details?: ItemDetails;
   /** null = personal item; UUID = shared household visible to every member. */
   household_id?: string | null;
   type: ItemType;

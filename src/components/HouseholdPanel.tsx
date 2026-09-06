@@ -20,10 +20,10 @@ import { useStore } from '../store/useStore';
 import {
   createHousehold,
   joinHousehold,
-  listHouseholds,
   previewHouseholdInvite,
   type Household,
 } from '../store/households';
+import { useSpaces } from '../spaces/useSpaces';
 import { shareHouseholdInvite } from '../sharing/householdInvite';
 
 type PanelMode = 'idle' | 'create' | 'join' | 'invite';
@@ -56,7 +56,7 @@ export function HouseholdPanel({
       return;
     }
     try {
-      const rows = await listHouseholds();
+      const rows = await useSpaces.getState().refresh();
       setHouseholds(rows);
       if (activeHouseholdId && !rows.some((row) => row.id === activeHouseholdId)) {
         setActiveHouseholdId(null);

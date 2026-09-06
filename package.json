@@ -48,7 +48,11 @@
     "web:build": "expo export -p web && node scripts/inject-pwa.mjs",
     "gen:web-icons": "node scripts/gen-web-icons.mjs",
     "test:delete": "node --experimental-strip-types scripts/test-delete.mts",
-    "test:speech": "node --experimental-strip-types scripts/test-speech-text.mts"
+    "test:speech": "node --experimental-strip-types scripts/test-speech-text.mts",
+    "test:spaces": "node --experimental-strip-types scripts/test-spaces.mts",
+    "test:knowledge": "node --experimental-strip-types scripts/test-knowledge-links.mts",
+    "test:planning": "node --experimental-strip-types scripts/test-planning.mts",
+    "test:remaining": "node --experimental-strip-types scripts/test-remaining.mts"
   },
   "private": true
 }

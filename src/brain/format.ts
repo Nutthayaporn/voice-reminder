@@ -6,6 +6,18 @@ const TZ = 'Asia/Bangkok';
 
 export function toolLabel(tool: ToolName): string {
   switch (tool) {
+    case 'assign_item': return 'ASSIGN';
+    case 'set_occurrence': return 'REPEAT STATUS';
+    case 'set_preference': return 'PREFERENCES';
+    case 'find_free_time': return 'FREE TIME';
+    case 'add_shopping':
+      return 'SHOPPING';
+    case 'remember_entity':
+      return 'PERSON / PET / PLACE';
+    case 'help':
+      return 'HELP';
+    case 'share_item':
+      return 'SHARE';
     case 'create_reminder':
       return '⏰ REMINDER';
     case 'create_event':

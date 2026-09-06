@@ -51,3 +51,22 @@ self.addEventListener('fetch', (event) => {
     ),
   );
 });
+
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data?.json() || {}; } catch { /* display safe fallback */ }
+  event.waitUntil(self.registration.showNotification(data.title || 'VORA', {
+    body: data.body || 'มีรายการถึงเวลาแล้ว', icon: '/icon-192.png',
+    tag: data.tag, data: { url: data.url || '/' },
+  }));
+});
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = new URL(event.notification.data?.url || '/', self.location.origin);
+  if (url.origin !== self.location.origin) return;
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (clients) => {
+    const client = clients.find((c) => new URL(c.url).origin === self.location.origin);
+    if (client) { await client.navigate(url.href); await client.focus(); }
+    else await self.clients.openWindow(url.href);
+  }));
+});
