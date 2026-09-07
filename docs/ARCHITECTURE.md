@@ -320,3 +320,9 @@ The help guide and help intent share `src/help/capabilities.ts`. Structured enti
 - Service worker displays generic lock-screen text and follows same-origin item links. The app opens only IDs present in its accessible cache. The scheduler checks a five-minute due window every minute and atomically leases sends, retries unsent leases after two minutes, and removes 404/410 subscriptions. A network/provider success followed by a database failure can still retry; service-worker tags coalesce duplicate presentation. There is no native-style repeating snooze on web.
 
 Server deployment and verification evidence are recorded in `docs/IMPLEMENTATION-ROADMAP.md`.
+
+## Connected calendars (read-only)
+
+`src/integrations/calendar/` adds Google/Outlook via the `calendar-api` Edge Function and Apple device access via Expo Calendar 57. Sources are explicit opt-in and account-keyed; external events remain ephemeral personal-space views, separate from mutable/synced `items`. `externalCalendar` marks read-only view Items and exclusive interval boundaries. Queries/availability merge them only in personal scope; item writes and notification scheduling do not import them. Refresh failure prevents incomplete free-time answers.
+
+Provider credentials are AES-GCM encrypted server-side. Service-only tables and atomic OAuth state completion are in `20260907100000_calendar_connections.sql`. See [calendar setup and limitations](CALENDAR-INTEGRATION.md) for OAuth provisioning, native rebuild, dedupe guarantees, refresh behavior, and live acceptance steps.

@@ -237,3 +237,9 @@ The linked Supabase project now has `web-push` with platform JWT verification en
 Native recurring notifications with exceptions or intervals greater than one use a rolling queue of up to eight upcoming occurrences (within ten years), refreshed when the app opens/resumes. Reopen the app periodically to replenish them; OS pending-notification limits still apply. Verify alarms on an actual device.
 
 Checks: `npx tsc --noEmit`, `npm run test:remaining`, existing regression scripts, and `npm run web:build`. `scripts/test-push-db.sql` validates claims and RLS in a rolled-back transaction. Live Groq checks use synthetic data and stop on HTTP 429. End-device push delivery still needs enabling a real browser subscription and pressing Send test.
+
+### เชื่อม Google / Outlook / Apple Calendar
+
+Settings → Calendars ให้เชื่อมบัญชีและเลือกปฏิทินที่จะอ่าน รายการแสดงรวมใน Calendar ของพื้นที่ส่วนตัว และใช้ตอบคำถามตาราง/หาเวลาว่างด้วยเสียงได้ นัดภายนอกเป็น read-only ไม่สร้างการแจ้งเตือนซ้ำใน VORA
+
+Google/Outlook ต้องตั้ง OAuth app, Supabase secrets และ deploy Edge Function ก่อน; Apple ต้อง rebuild แอป iOS พร้อม Expo Calendar ดู [วิธีตั้งค่าและข้อจำกัด](docs/CALENDAR-INTEGRATION.md) และทดสอบด้วย `npm run test:calendar`.

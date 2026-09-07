@@ -4,6 +4,10 @@ export const dateKey = (date: Date | string) => new Intl.DateTimeFormat('en-CA',
 const dayNumber = (date: Date | string) => Date.parse(`${dateKey(date)}T00:00:00+07:00`) / DAY;
 export function occursOn(item: Item, day: Date): boolean {
   if (!item.start_at) return false;
+  if (item.externalCalendar) {
+    const start = Date.parse(`${dateKey(day)}T00:00:00+07:00`);
+    return Date.parse(item.start_at) < start + DAY && Date.parse(item.end_at ?? item.start_at) > start;
+  }
   const first = dateKey(item.start_at), key = dateKey(day);
   if (key < first) return false;
   if (!item.recurrence) return item.end_at ? key <= dateKey(item.end_at) : key === first;

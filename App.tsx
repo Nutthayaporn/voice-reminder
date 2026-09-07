@@ -1,3 +1,6 @@
+import { CalendarConnectionsPanel, CalendarSyncNotice, ExternalEventRow } from './src/components/CalendarConnectionsPanel';
+import { activateCalendars, ensureCalendarRange, externalItems, refreshCalendars, useCalendars } from './src/integrations/calendar/store';
+import { defaultRange } from './src/integrations/calendar/model';
 import { WebPushPanel } from './src/components/WebPushPanel';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
@@ -230,6 +233,15 @@ function VoiceReminderApp() {
 
   const items = useStore((state) => state.items);
   const userId = useStore((state) => state.userId);
+  const calendarEvents = useCalendars((state) => state.events);
+  useEffect(() => {
+    void activateCalendars(userId);
+    if (Platform.OS === 'web' && new URL(window.location.href).searchParams.has('calendar_result')) setActiveTab('settings');
+    const refresh = () => { void refreshCalendars(); };
+    const listener = AppState.addEventListener('change', state => { if (state === 'active') refresh(); });
+    const interval = setInterval(() => { if (AppState.currentState === 'active') refresh(); }, 5 * 60000);
+    return () => { listener.remove(); clearInterval(interval); };
+  }, [userId]);
   useEffect(() => { void useSpaces.getState().refresh().catch(() => {}); }, [userId, appIsActive]);
   const hasHydrated = useStore((state) => state.hasHydrated);
   const addItem = useStore((state) => state.addItem);
@@ -472,7 +484,19 @@ function VoiceReminderApp() {
       const scope = (action: BrainPlan['actions'][number]) => resolveSpace(action, selected, available);
       const snapshot = () => useStore.getState().items;
       const scoped = (action: BrainPlan['actions'][number]) => itemsInSpace(snapshot(), scope(action));
+      const calendarActions = p.actions.filter(a => ((a.tool === 'query' && a.query_kind !== 'search' && a.query_kind !== 'shopping' && a.query_kind !== 'overdue') || a.tool === 'find_free_time' || a.tool === 'create_event' || (a.tool === 'update_item' && a.datetime)) && !scope(a));
+      if (calendarActions.length) {
+        const dates = calendarActions.flatMap(a => [a.datetime, a.end_datetime]).filter((d): d is string => !!d).map(d => Date.parse(d)).filter(Number.isFinite);
+        const start = dates.length ? Math.min(...dates) : Date.now();
+        const end = dates.length ? Math.max(...dates) : Date.now();
+        await ensureCalendarRange(executionUser, new Date(start - 86400000).toISOString(), new Date(end + 2 * 86400000).toISOString());
+        if (useStore.getState().userId !== executionUser) throw new Error('Account changed. Please try again.');
+      }
+      const readable = (action: BrainPlan['actions'][number]) => [...scoped(action), ...externalItems(executionUser, scope(action))];
       validatePlanLinks(p.actions, snapshot(), scope);
+      if (p.actions.some(a => ['update_item', 'delete_item', 'share_item', 'assign_item', 'set_occurrence', 'link_reminder'].includes(a.tool) && a.target_ref?.startsWith('external:'))) {
+        throw new Error(languageRef.current === 'th' ? 'นัดจากปฏิทินที่เชื่อมต่ออ่านได้อย่างเดียว กรุณาแก้ไขในแอปปฏิทินต้นทาง' : 'Connected calendar events are read only. Edit them in the original calendar app.');
+      }
       // Validate every local action before any side effects.
       for (const action of p.actions) {
         if (CREATE_TOOLS.includes(action.tool) || ['query', 'update_item', 'delete_item', 'share_item', 'assign_item', 'set_occurrence', 'find_free_time'].includes(action.tool)) {
@@ -594,15 +618,15 @@ function VoiceReminderApp() {
           assignmentPatch(target, action.assignee_id, action.notify_user_ids, available.find((space) => space.id === scope(action))?.members ?? []);
         }
         if (action.tool === 'set_occurrence') occurrencePatch(scoped(action).find((item) => item.id === action.target_ref)!, action.occurrence_date ?? dateKey(new Date()), action.occurrence_status ?? 'done');
-        if (action.tool === 'find_free_time') freeSlots(scoped(action), new Date(action.datetime ?? ''), new Date(action.end_datetime ?? ''), action.duration_minutes ?? 60);
+        if (action.tool === 'find_free_time') freeSlots(readable(action), new Date(action.datetime ?? ''), new Date(action.end_datetime ?? ''), action.duration_minutes ?? 60);
         if (action.tool === 'set_preference') changeDefaults(usePreferences.getState().personalDefaults[executionUser ?? 'local'] ?? initialDefaults, action.preference_key ?? '', action.preference_value ?? null);
         if (!allowConflicts && (action.tool === 'create_event' || action.tool === 'update_item') && action.datetime) {
           const target = action.tool === 'update_item' ? scoped(action).find((item) => item.id === action.target_ref) : null;
           if (target && target.type !== 'event') continue;
           const from = new Date(action.datetime), until = action.end_datetime ? new Date(action.end_datetime) : new Date(from.getTime() + (action.all_day ? 86400000 : 3600000));
-          if (busySlots(scoped(action).filter((item) => item.id !== target?.id), from, until).length) {
+          if (busySlots(readable(action).filter((item) => item.id !== target?.id), from, until).length) {
             conflictRef.current = { plan: p, text: rawText, userId: executionUser, space: selected };
-            const alternative = freeSlots(scoped(action).filter((item) => item.id !== target?.id), from, new Date(from.getTime() + 86400000), (until.getTime() - from.getTime()) / 60000)[0];
+            const alternative = freeSlots(readable(action).filter((item) => item.id !== target?.id), from, new Date(from.getTime() + 86400000), (until.getTime() - from.getTime()) / 60000)[0];
             const label = alternative ? new Intl.DateTimeFormat(languageRef.current === 'th' ? 'th-TH' : 'en-US', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' }).format(new Date(alternative.start)) : '';
             const question = languageRef.current === 'th' ? `เวลานี้มีนัดอยู่แล้ว ${label ? `ช่วงว่างถัดไปเริ่ม ${label} ` : ''}พูดยืนยันเพื่อนัดซ้อน หรือบอกเวลาใหม่` : `This overlaps an event. ${label ? `The next free slot starts ${label}. ` : ''}Say confirm to keep the overlap, or choose a different time.`;
             setPlan({ ...p, actions: [], speak_back: question, needs_clarification: true, clarify_question: question }); say(question); return;
@@ -696,7 +720,7 @@ function VoiceReminderApp() {
           const result = await searchMemory(queryAction.title || rawText, scoped(queryAction), languageRef.current);
           if (useStore.getState().userId !== executionUser) throw new Error('Account changed. Please ask again.');
           answer = result.answer; setMemorySources(result.sources);
-        } else answer = answerQuery(scoped(queryAction), queryAction, new Date(), languageRef.current);
+        } else answer = answerQuery(readable(queryAction), queryAction, new Date(), languageRef.current);
       }
 
       // ── daily-budget actions (REST bridge) ────────────────────────────────
@@ -730,7 +754,7 @@ function VoiceReminderApp() {
 
       const free = p.actions.find((action) => action.tool === 'find_free_time');
       if (free) {
-        const slots = freeSlots(scoped(free), new Date(free.datetime ?? ''), new Date(free.end_datetime ?? ''), free.duration_minutes ?? 60);
+        const slots = freeSlots(readable(free), new Date(free.datetime ?? ''), new Date(free.end_datetime ?? ''), free.duration_minutes ?? 60);
         const format = (date: string) => new Intl.DateTimeFormat(languageRef.current === 'th' ? 'th-TH' : 'en-US', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' }).format(new Date(date));
         answer = slots.length ? `Available: ${slots.slice(0,5).map((slot) => `${format(slot.start)} – ${format(slot.end)}`).join('; ')}` : 'There are no free slots in that range.';
       }
@@ -757,7 +781,7 @@ function VoiceReminderApp() {
       // Refresh what "อันแรก / อันเมื่อกี้" points at for the next turn.
       let refItems: Item[];
       if (queryAction && queryAction.query_kind !== 'search') {
-        refItems = queryItems(scoped(queryAction), queryAction);
+        refItems = queryItems(readable(queryAction), queryAction);
       } else if (created.length) {
         refItems = created;
       } else {
@@ -894,7 +918,7 @@ function VoiceReminderApp() {
           const resolvedPlan: BrainPlan = {
             ...parsed,
             actions: parsed.actions.map((action) => {
-              if (action.tool !== 'delete_item') return action;
+              if (action.tool !== 'delete_item' || action.target_ref?.startsWith('external:')) return action;
               const currentItems = itemsInSpace(allItems, resolveSpace(action, requestSpace, available));
               const refExists = currentItems.some((item) => item.id === action.target_ref);
               if (refExists) return action;
@@ -910,6 +934,7 @@ function VoiceReminderApp() {
             return;
           }
 
+          if (resolvedPlan.actions.some(a => ['delete_item', 'update_item', 'share_item', 'assign_item', 'set_occurrence'].includes(a.tool) && a.target_ref?.startsWith('external:'))) throw new Error(languageRef.current === 'th' ? 'นัดจากปฏิทินที่เชื่อมต่ออ่านได้อย่างเดียว กรุณาแก้ไขในแอปปฏิทินต้นทาง' : 'Connected calendar events are read only. Edit them in the original calendar app.');
           const bulkAction = resolvedPlan.actions.find((action) => action.tool === 'delete_items');
           const enumeratedDeletes = resolvedPlan.actions.filter(
             (action) => action.tool === 'delete_item' && !!action.target_ref,
@@ -1169,7 +1194,8 @@ function VoiceReminderApp() {
             : 'READY FOR COMMAND';
   const visibleItems = itemsInSpace(items, userId ? activeHouseholdId : null).filter((item) => item.id !== pendingDelete?.id);
   const recentItems = visibleItems.slice(0, 3);
-  const dayItems = visibleItems
+  const calendarItems = [...visibleItems, ...(calendarEvents.length ? externalItems(userId, userId ? activeHouseholdId : null) : [])];
+  const dayItems = calendarItems
     .filter((item) => itemCoversDay(item, selectedDate))
     .sort((a, b) => (a.start_at ?? '').localeCompare(b.start_at ?? ''));
 
@@ -1420,10 +1446,11 @@ function VoiceReminderApp() {
                   <Text style={styles.screenSubtitle}>Tap a day to see what's on it</Text>
                 </View>
               </View>
+              {(!userId || !activeHouseholdId) && <CalendarSyncNotice />}
               <CalendarMonth
-                items={visibleItems}
+                items={calendarItems}
                 selectedDate={selectedDate}
-                onSelectDate={setSelectedDate}
+                onSelectDate={(day) => { setSelectedDate(day); void refreshCalendars(defaultRange(new Date(`${day}T12:00:00+07:00`))); }}
               />
               <View style={styles.calendarDayHeading}>
                 <Text style={styles.calendarDayTitle}>{formatDayHeading(selectedDate)}</Text>
@@ -1433,7 +1460,7 @@ function VoiceReminderApp() {
               </View>
               {dayItems.length ? (
                 <View style={styles.itemList}>
-                  {dayItems.map((item) => (
+                  {dayItems.map((item) => (item.externalCalendar ? <ExternalEventRow key={item.id} item={item} /> :
                     <ItemRow
                       key={item.id}
                       item={item}
@@ -1461,6 +1488,9 @@ function VoiceReminderApp() {
 
               <Text style={styles.settingsSection}>Account</Text>
               <CloudSyncPanel autoOpen={!!pendingHouseholdInviteCode && !userId} />
+
+              <Text style={styles.settingsSection}>Calendars</Text>
+              <CalendarConnectionsPanel key={userId ?? 'local'} />
 
               <Text style={styles.settingsSection}>Assistant</Text>
               <PersonalDefaultsPanel />

@@ -12,6 +12,7 @@
     "expo": "~57.0.18",
     "expo-audio": "~57.0.4",
     "expo-auth-session": "~57.0.10",
+    "expo-calendar": "~57.0.2",
     "expo-crypto": "~57.0.2",
     "expo-file-system": "~57.0.6",
     "expo-linking": "~57.0.8",
@@ -52,7 +53,9 @@
     "test:spaces": "node --experimental-strip-types scripts/test-spaces.mts",
     "test:knowledge": "node --experimental-strip-types scripts/test-knowledge-links.mts",
     "test:planning": "node --experimental-strip-types scripts/test-planning.mts",
-    "test:remaining": "node --experimental-strip-types scripts/test-remaining.mts"
+    "test:remaining": "node --experimental-strip-types scripts/test-remaining.mts",
+    "test:calendar": "node scripts/test-calendar.mjs",
+    "test:calendar-api": "node scripts/test-calendar-api.mjs"
   },
   "private": true
 }

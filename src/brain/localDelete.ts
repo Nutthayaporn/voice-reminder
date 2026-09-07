@@ -22,6 +22,9 @@ export function planLocalDelete(
   }
 
   const ordinalRef = resolveOrdinal(clean, conversationReferents, items);
+  if (ordinalRef?.startsWith('external:')) {
+    return { actions: [], speak_back: 'นัดจากปฏิทินที่เชื่อมต่ออ่านได้อย่างเดียว กรุณาแก้ไขในแอปปฏิทินต้นทาง', needs_clarification: false, clarify_question: null };
+  }
   if (ordinalRef) {
     const target = items.find((item) => item.id === ordinalRef);
     if (target) return plan(deleteAction('delete_item', target.title, target.id, null), 'Item deleted.');

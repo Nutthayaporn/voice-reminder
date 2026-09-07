@@ -2,7 +2,7 @@ import type { Item } from '../store/types';
 import { occurrenceDates } from './recurrence.ts';
 export interface TimeSlot { start: string; end: string }
 export function busySlots(items: Item[], start: Date, end: Date): TimeSlot[] {
-  return items.filter((i) => i.type === 'event' && !i.done).flatMap((i) => {
+  return items.filter((i) => i.type === 'event' && !i.done && i.externalCalendar?.busy !== false).flatMap((i) => {
     if (!i.start_at) return [];
     const duration = i.end_at ? Date.parse(i.end_at) - Date.parse(i.start_at) : (i.all_day ? 86400000 : 3600000);
     if (!i.recurrence) return Date.parse(i.start_at) < end.getTime() && Date.parse(i.start_at) + duration > start.getTime() ? [{ start: i.start_at, end: new Date(Date.parse(i.start_at) + duration).toISOString() }] : [];

@@ -73,7 +73,13 @@
         }
       ],
       "expo-web-browser",
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "ใช้เพื่ออ่านปฏิทินที่คุณเลือกและตอบคำถามเกี่ยวกับตารางนัดหมาย"
+        }
+      ]
     ],
     "extra": {
       "eas": {

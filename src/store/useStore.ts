@@ -321,6 +321,7 @@ export const useStore = create<StoreState>()(
         pendingOps: [],
 
         addItem: (item) => {
+          if (item.externalCalendar || item.id.startsWith('external:')) throw new Error('Connected calendar events are read only.');
           const normalised = normaliseItem(item);
           set((state) => ({ items: [normalised, ...state.items] }));
           queueUpsert(normalised);
@@ -348,6 +349,7 @@ export const useStore = create<StoreState>()(
         },
 
         updateItem: async (id, patch) => {
+          if (id.startsWith('external:') || patch.externalCalendar) throw new Error('Connected calendar events are read only.');
           const parent = get().items.find((item) => item.id === id);
           const account = get().userId;
           const linked = parent ? linkedPatches(get().items, parent, patch) : [];
