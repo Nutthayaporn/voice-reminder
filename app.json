@@ -79,6 +79,14 @@
         {
           "calendarPermission": "ใช้เพื่ออ่านปฏิทินที่คุณเลือกและตอบคำถามเกี่ยวกับตารางนัดหมาย"
         }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "usePrecompiledModules": false
+          }
+        }
       ]
     ],
     "extra": {

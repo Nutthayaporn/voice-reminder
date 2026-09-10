@@ -68,7 +68,7 @@
 | --- | --- |
 | `App.tsx` | navigation พูด/รายการ/ตั้งค่า + ปุ่มไมค์ + แสดงผล + พูดกลับ |
 | `src/speech/types.ts` | **สัญญากลาง** ของ speech (engine id, status, ผลลัพธ์) |
-| `src/speech/useVoiceInput.ts` | คุมการอัด/ฟัง, auto-stop หลังเงียบ 2–3 วินาที แล้วส่ง transcript ทาง `onResult` |
+| `src/speech/useVoiceInput.ts` | คุมการอัด/ฟัง, auto-stop หลังเงียบประมาณ 0.8 วินาที แล้วส่ง transcript ทาง `onResult` |
 | `src/speech/cloudGroq.ts` | STT ฝั่ง cloud — อัพโหลดเสียงไป Groq Whisper |
 | `src/speech/deviceStt.ts` | STT ในเครื่อง (expo-speech-recognition) + เช็คว่ารันได้ไหม |
 | `src/speech/webStt.ts` | STT บน browser ผ่าน Web Speech API + live partial |
@@ -114,7 +114,7 @@ npx expo start
 
 เมื่อเปิดแอปใหม่ VORA จะขอสิทธิ์ไมค์ (ถ้ายังไม่ได้อนุญาต), ทักสั้น ๆ หนึ่งครั้ง แล้วเปิดไมค์
 ให้พูดได้ทันที. ระหว่าง app session เดียวกัน หากสลับแท็บหรือกลับเข้า **Talk** จะเปิดไมค์ให้พูด
-ได้เลยโดยไม่ทักซ้ำ; เมื่อปิดแล้วเปิดแอปใหม่จึงทักใหม่. เมื่อเงียบประมาณ 1.2 วินาทีระบบจะถือว่าพูดจบ;
+ได้เลยโดยไม่ทักซ้ำ; เมื่อปิดแล้วเปิดแอปใหม่จึงทักใหม่. เมื่อเงียบประมาณ 0.8 วินาทีระบบจะถือว่าพูดจบ;
 เมื่อ Hands-free เป็น OFF หลัง AI ตอบจะไม่เปิดไมค์ซ้ำ หากต้องการสั่งต่อให้แตะ **Tap to Talk**. นี่เป็น one-shot
 ของหน้า Talk และไม่เกี่ยวกับ config Hands-free. **Hands-free** เป็น config แยก
 (ค่าเริ่มต้น OFF) สำหรับเปิดไมค์ต่อหลัง AI ตอบ; เปิดปิดได้จากปุ่มใต้ไมค์หรือ Settings.
@@ -137,6 +137,14 @@ Time Sensitive notification หลายรอบสำหรับรายก�
 Android 12/12L อาจขอสิทธิ์
 “Alarms & reminders”; Android 13+ ใช้ `USE_EXACT_ALARM` เพราะการเตือนตามเวลาคือ core function
 ของแอป (ตอนขึ้น Play Store ต้องระบุ use case ให้ตรงนโยบาย)
+
+### iOS native build
+
+ใช้ `npm run ios:device` เพื่อเลือก iPhone ที่เชื่อมต่อและติดตั้ง Debug build (ต้องเปิด Metro ไว้).
+โปรเจกต์ตั้ง `expo-build-properties.ios.usePrecompiledModules=false` เพื่อคอมไพล์ Expo modules
+จาก source ให้ตรงกับ React Native: precompiled ExpoModulesCore เคย crash ตอนเริ่มแอปใน
+`ExpoViewProps → React Props` บน iPhone. การ build ครั้งแรกจึงใช้เวลามากขึ้น.
+หลังเปลี่ยน native dependencies ให้รัน `npx pod-install` ก่อน build ใหม่.
 
 ### รันบนเว็บ / สร้าง PWA
 
@@ -243,3 +251,31 @@ Checks: `npx tsc --noEmit`, `npm run test:remaining`, existing regression script
 Settings → Calendars ให้เชื่อมบัญชีและเลือกปฏิทินที่จะอ่าน รายการแสดงรวมใน Calendar ของพื้นที่ส่วนตัว และใช้ตอบคำถามตาราง/หาเวลาว่างด้วยเสียงได้ นัดภายนอกเป็น read-only ไม่สร้างการแจ้งเตือนซ้ำใน VORA
 
 Google/Outlook ต้องตั้ง OAuth app, Supabase secrets และ deploy Edge Function ก่อน; Apple ต้อง rebuild แอป iOS พร้อม Expo Calendar ดู [วิธีตั้งค่าและข้อจำกัด](docs/CALENDAR-INTEGRATION.md) และทดสอบด้วย `npm run test:calendar`.
+
+### Daily Budget ผ่าน MCP
+
+เพิ่ม `EXPO_PUBLIC_BUDGET_MCP_URL` หลัง deploy `budget-mcp` และ `mcp-token` ใน project ของ Daily Budget เพื่อเปลี่ยนคำสั่งงบเดิมไปใช้ MCP โดยยังใช้ OAuth บัญชีเดิมและคง `EXPO_PUBLIC_BUDGET_API_URL` ไว้ ไม่ตั้ง MCP URL จะใช้ REST ตามเดิม ดูคู่มือและ config สำหรับ client อื่นใน `../daily-budget/mcp/README.md` ทดสอบ VORA ด้วย `node scripts/test-budget-mcp.mjs`
+
+### เชื่อม MCP ผ่านหน้า Settings
+
+เข้า **Settings → MCP Connections → Daily Budget** แล้วเชื่อมบัญชี ใส่ MCP Server URL (แอปเติมจาก Daily Budget API ให้) กด **ทดสอบการเชื่อมต่อ** เพื่อดูเครื่องมือที่บัญชีมีสิทธิ์ใช้ จากนั้นเปิด **ใช้ MCP กับคำสั่งเสียง** และกด **บันทึกการตั้งค่า** การเปิดใช้งานจะตรวจเซิร์ฟเวอร์อีกครั้งก่อนบันทึก เมื่อปิดและบันทึกจะใช้ REST เดิม ค่าถูกเก็บเฉพาะเครื่อง ไม่ได้ซิงก์ข้ามอุปกรณ์
+
+ต้อง deploy `budget-mcp` และ `mcp-token` ของ Daily Budget ก่อนทดสอบจริง รวมถึงอนุญาต origin ของเว็บ VORA ที่เซิร์ฟเวอร์ การเชื่อมบัญชียังใช้ OAuth deep link เดิมที่ต้องมีแอป Daily Budget; หน้านี้ไม่ได้เพิ่ม web OAuth login ใหม่ ไม่ต้องกรอก secret ในหน้า MCP และ URL ต้องเป็นโปรเจกต์ Daily Budget ที่แอปตั้งไว้
+
+การตั้งค่า Daily Budget อยู่ใน `src/integrations/mcp/connections.ts` ส่วน registry เครื่องมือกลางอยู่ใน `src/integrations/mcp/agentTools.ts` รองรับ Daily Budget และ Gmail โดยค้นหา schema เครื่องมืออ่านจากบริการที่เชื่อมแล้ว ยังไม่รับ URL MCP ทั่วไป
+
+ตรวจด้วย `node scripts/test-mcp-connections.mjs`, `node scripts/test-budget-mcp.mjs` และ `npx tsc --noEmit`
+
+### Gmail MCP
+
+Settings → MCP Connections มี Gmail สำหรับเชื่อม Google OAuth และทดสอบรายชื่อเครื่องมืออ่านจาก MCP ทางการ (Developer Preview) ใช้ Supabase ของ **VORA** แยกจาก Daily Budget ดู [คู่มือตั้งค่า Gmail ภาษาไทย](docs/GMAIL_MCP_TH.md) รองรับคำสั่งเสียงอ่าน/ค้นอีเมลผ่านระบบเครื่องมือกลาง
+
+### ระบบเครื่องมือกลางของ VORA
+
+เสียง → STT → LLM → registry เครื่องมือ → อ่านผล → LLM เรียกต่อหรือสร้างแผน → executor เดิม → ตอบเสียง
+
+`src/brain/agent.ts` ใช้ Groq tool calling กับ schema จาก MCP ของบัญชีที่เชื่อม: Gmail อ่านอย่างเดียว, Daily Budget summary/list และเครื่องมืออ่านรายการภายใน VORA ตัว loop จำกัด 6 tool calls ตรวจบัญชี/พื้นที่ก่อนและหลังแต่ละขั้น และไม่ retry เมื่อเครื่องมือผิดพลาด ข้อมูลอีเมลเป็น untrusted data และส่งเฉพาะผลที่เรียกอ่านให้ Groq ไม่มีการส่ง OAuth token ให้โมเดล
+
+งานเขียน Todo/Note/Reminder/ค่าใช้จ่ายยังผ่าน executor เดิมและสิทธิ์เดิม แผนเขียนที่อาศัยข้อมูล MCP ต้องยืนยันรายละเอียดก่อน (หมดอายุ 2 นาที) ยังไม่รองรับ arbitrary MCP URL หรือ Gmail ส่งเมล
+
+หลังอัปเดตต้อง deploy `gmail-api` ใหม่เพื่อรองรับ tools/call แล้ว rebuild VORA; Daily Budget ต้องเปิด MCP ตามการตั้งค่าเดิม ทดสอบด้วย `node scripts/test-agent-loop.mjs` และ Gmail Deno tests

@@ -32,7 +32,7 @@ implementation สลับได้ที่ runtime (ดู `src/speech/`)
 - **Hands-free conversation** เป็น preference แยก (default `false`) ซึ่งเปิดไมค์อีกครั้ง
   หลัง AI ตอบ ผู้ใช้เปิดปิดได้ทั้งจากหน้า Talk และ Settings.
   Cloud ใช้ metering ของ `expo-audio` เป็น VAD, วัด noise floor ช่วง 600 ms แรกเพื่อไม่ให้
-  เสียงทีวี/พัดลมถูกนับเป็นเสียงพูดค้าง แล้วหยุดหลังเงียบ 1.2 วินาที; device/web ใช้
+  เสียงทีวี/พัดลมถูกนับเป็นเสียงพูดค้าง แล้วหยุดหลังเงียบ 0.8 วินาที; device/web ใช้
   natural endpoint ของ recognizer ร่วมกับ silence hint/timer. Preference `autoStopEnabled`
   (default `true`) ใช้ปิด
   endpoint อัตโนมัติได้; เมื่อปิด cloud จะไม่รัน VAD และ device/web จะใช้ continuous mode

@@ -103,6 +103,8 @@ export interface BrainAction {
 }
 
 export interface BrainPlan {
+  /** Internal marker: writes were planned after reading tool results. */
+  externalDataUsed?: boolean;
   /** ลำดับ action ที่จะทำ; ว่าง = ไม่มีคำสั่ง (คุยเล่น) */
   actions: BrainAction[];
   /** A short sentence in the selected response language spoken back to the user (for example, "Done."). */

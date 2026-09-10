@@ -1,12 +1,61 @@
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
-import { colors, radius } from '../theme';
+import { Ionicons } from '@expo/vector-icons';
+import { colors, font, radius, spacing } from '../theme';
 import { useStore } from '../store/useStore';
 import { appleAvailable } from '../integrations/calendar/apple';
 import { connectCalendar, disconnectCalendar, hideCalendars, refreshCalendars, toggleCalendar, useCalendars } from '../integrations/calendar/store';
 import { providerNames, sourceKey } from '../integrations/calendar/model';
 import type { Provider } from '../integrations/calendar/model';
 import type { Item } from '../store/types';
+
+const providerIcons: Record<Provider, keyof typeof Ionicons.glyphMap> = {
+  google: 'logo-google',
+  outlook: 'mail-outline',
+  apple: 'logo-apple',
+};
+
+export function calendarProviders(): Provider[] {
+  return Platform.OS === 'ios' ? ['google', 'outlook', 'apple'] : ['google', 'outlook'];
+}
+
+/** Second-level menu: one row per calendar provider, drilling into its detail. */
+export function CalendarProviderMenu({ onSelect }: { onSelect: (provider: Provider) => void }) {
+  const userId = useStore(s => s.userId);
+  const state = useCalendars();
+  return (
+    <View style={styles.menuGroup}>
+      {calendarProviders().map((provider, index) => {
+        const connection = state.connections.find(c => c.provider === provider);
+        const connected = provider === 'apple'
+          ? state.appleConnected
+          : !!connection?.connected || state.selected.some(k => k.startsWith(`${provider}:`));
+        const count = state.selected.filter(k => k.startsWith(`${provider}:`)).length;
+        return (
+          <View key={provider}>
+            {index > 0 && <View style={styles.menuSep} />}
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => onSelect(provider)}
+              style={({ pressed }) => [styles.menuRow, pressed && styles.menuRowPressed]}
+            >
+              <View style={styles.menuIcon}>
+                <Ionicons name={providerIcons[provider]} size={18} color={colors.primary} />
+              </View>
+              <View style={styles.menuCopy}>
+                <Text style={styles.menuLabel}>{providerNames[provider]}</Text>
+                <Text style={styles.menuSub} numberOfLines={1}>
+                  {connected ? (count ? `Connected · ${count} calendar${count > 1 ? 's' : ''}` : 'Connected') : 'Not connected'}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={colors.textFaint} />
+            </Pressable>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
 export function ExternalEventRow({ item }: { item: Item }) {
   const external = item.externalCalendar!;
   const time = item.all_day ? 'All day' : new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' }).format(new Date(item.start_at!));
@@ -15,7 +64,7 @@ export function ExternalEventRow({ item }: { item: Item }) {
     <Text style={styles.hint}>{time} · {providerNames[external.provider]} · Read only{!external.busy ? ' · Free' : ''}</Text>
   </View>;
 }
-export function CalendarConnectionsPanel() {
+export function CalendarConnectionsPanel({ only }: { only?: Provider } = {}) {
   const userId = useStore(s => s.userId);
   const state = useCalendars();
   const [working, setWorking] = useState(false);
@@ -33,7 +82,7 @@ export function CalendarConnectionsPanel() {
     try { await task(); } catch (e) { setMessage(e instanceof Error ? e.message : String(e)); }
     finally { setWorking(false); }
   };
-  const providers: Provider[] = Platform.OS === 'ios' ? ['google', 'outlook', 'apple'] : ['google', 'outlook'];
+  const providers: Provider[] = only ? [only] : calendarProviders();
   return <View style={styles.card}>
     <Text style={styles.label}>Connected calendars</Text>
     <Text style={styles.hint}>Read selected calendars in your personal space and ask VORA about your schedule. Events stay read only; reminders remain with the original calendar.</Text>
@@ -82,4 +131,12 @@ const styles = StyleSheet.create({
   disabled: { opacity: 0.4 },
   error: { color: colors.warning, fontSize: 13, lineHeight: 19 },
   event: { padding: 16, gap: 6, borderBottomWidth: 1, borderColor: colors.border, backgroundColor: colors.card },
+  menuGroup: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, overflow: 'hidden' },
+  menuRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, minHeight: 60, paddingVertical: spacing.md, paddingHorizontal: spacing.lg },
+  menuRowPressed: { backgroundColor: colors.cardRaised },
+  menuIcon: { width: 34, height: 34, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
+  menuCopy: { flex: 1, minWidth: 0, gap: 2 },
+  menuLabel: { color: colors.text, fontSize: font.md, fontWeight: '600' },
+  menuSub: { color: colors.textMute, fontSize: font.xs, lineHeight: 16 },
+  menuSep: { height: 1, backgroundColor: colors.border, marginLeft: 64 },
 });
