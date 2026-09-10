@@ -414,3 +414,11 @@ enabled = true
 
 [functions.web-push]
 verify_jwt = true
+
+[functions.calendar-api]
+# OAuth callback is public; every POST validates the user JWT with auth.getUser.
+verify_jwt = false
+
+[functions.gmail-api]
+# Only the OAuth callback bypasses user auth; every POST calls auth.getUser.
+verify_jwt = false

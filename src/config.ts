@@ -29,6 +29,7 @@ export const config = {
    */
   budgetApi: {
     url: process.env.EXPO_PUBLIC_BUDGET_API_URL ?? '',
+    mcpUrl: process.env.EXPO_PUBLIC_BUDGET_MCP_URL ?? '',
     token: process.env.EXPO_PUBLIC_BUDGET_API_TOKEN ?? '',
   },
 

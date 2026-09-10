@@ -76,7 +76,7 @@ export async function planActions(
   return normalise(data.choices?.[0]?.message?.content ?? '{}');
 }
 
-function normalise(raw: string): BrainPlan {
+export function normalise(raw: string): BrainPlan {
   let obj: Record<string, unknown> = {};
   try {
     obj = JSON.parse(raw);

@@ -1,3 +1,7 @@
+import { McpConnectionsPanel, McpConnectionMenu, type McpConnectionId } from './src/components/McpConnectionsPanel';
+import { CalendarConnectionsPanel, CalendarProviderMenu, CalendarSyncNotice, ExternalEventRow } from './src/components/CalendarConnectionsPanel';
+import { activateCalendars, ensureCalendarRange, externalItems, refreshCalendars, useCalendars } from './src/integrations/calendar/store';
+import { defaultRange, providerNames, type Provider } from './src/integrations/calendar/model';
 import { WebPushPanel } from './src/components/WebPushPanel';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
@@ -5,6 +9,7 @@ import {
   Animated,
   AppState,
   Easing,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -36,7 +41,7 @@ import { getEngines } from './src/speech/engines';
 import { useVoiceInput } from './src/speech/useVoiceInput';
 import { speak, stopSpeaking } from './src/speech/tts';
 import type { SttEngineId, TranscriptResult, VoiceStatus } from './src/speech/types';
-import { planActions } from './src/brain/planActions';
+import { planWithTools } from './src/brain/agent';
 import { actionToItem } from './src/brain/toItem';
 import { searchMemory } from './src/brain/searchMemory';
 import { describeAction, toolLabel, formatDateTime, formatRecurrence } from './src/brain/format';
@@ -112,6 +117,26 @@ const HUD_PARTICLES = [
 const CORE_TICKS = Array.from({ length: 24 }, (_, index) => index);
 const WAVEFORM_HEIGHTS = [4, 9, 14, 7, 12, 5, 10] as const;
 type AppTab = 'talk' | 'items' | 'calendar' | 'settings';
+type SettingsRoute =
+  | 'account'
+  | 'sharing'
+  | 'assistant'
+  | 'people'
+  | 'calendars'
+  | 'alerts'
+  | 'voice'
+  | 'budget';
+
+const SETTINGS_TITLES: Record<SettingsRoute, string> = {
+  account: 'Account',
+  sharing: 'Sharing',
+  assistant: 'Assistant',
+  people: 'People & places',
+  calendars: 'Calendars',
+  alerts: 'Alerts',
+  voice: 'Voice',
+  budget: 'MCP Connections',
+};
 interface PendingBulkDelete {
   itemIds: string[];
   description: string;
@@ -145,6 +170,20 @@ function VoiceReminderApp() {
     'cloud';
   const [engine, setEngine] = useState<SttEngineId>(firstAvailable);
   const [activeTab, setActiveTab] = useState<AppTab>('talk');
+  const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
+  // Second-level selection inside Calendars (a Provider) and MCP (a connection id).
+  const [settingsSubRoute, setSettingsSubRoute] = useState<string | null>(null);
+  const openSettingsRoute = useCallback((route: SettingsRoute) => {
+    setSettingsSubRoute(null);
+    setSettingsRoute(route);
+  }, []);
+  useEffect(() => {
+    if (Platform.OS === 'web' && new URL(window.location.href).searchParams.has('gmail_result')) {
+      setActiveTab('settings');
+      setSettingsRoute('budget');
+      setSettingsSubRoute('gmail');
+    }
+  }, []);
   const [selectedDate, setSelectedDate] = useState<string>(() => bkkDateStr());
   const [last, setLast] = useState<TranscriptResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -166,6 +205,7 @@ function VoiceReminderApp() {
   const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
   const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingBulkDeleteRef = useRef<PendingBulkDelete | null>(null);
+  const pendingAgentPlan = useRef<{ plan: BrainPlan; text: string; user: string | null; space: string | null; expires: number } | null>(null);
   const startListeningRef = useRef<() => Promise<void>>(async () => {});
   const cancelListeningRef = useRef<() => Promise<void>>(async () => {});
   const voiceStatusRef = useRef<VoiceStatus>('idle');
@@ -230,6 +270,27 @@ function VoiceReminderApp() {
 
   const items = useStore((state) => state.items);
   const userId = useStore((state) => state.userId);
+  const userEmail = useStore((state) => state.userEmail);
+
+  // A pending invite should drill straight into the relevant settings page so
+  // the sign-in / join flow (auto-open) still fires with the drill-down layout.
+  useEffect(() => {
+    if (!pendingHouseholdInviteCode) return;
+    setActiveTab('settings');
+    setSettingsRoute(userId ? 'sharing' : 'account');
+  }, [pendingHouseholdInviteCode, userId]);
+  const calendarEvents = useCalendars((state) => state.events);
+  useEffect(() => {
+    void activateCalendars(userId);
+    if (Platform.OS === 'web' && new URL(window.location.href).searchParams.has('calendar_result')) {
+      setActiveTab('settings');
+      openSettingsRoute('calendars');
+    }
+    const refresh = () => { void refreshCalendars(); };
+    const listener = AppState.addEventListener('change', state => { if (state === 'active') refresh(); });
+    const interval = setInterval(() => { if (AppState.currentState === 'active') refresh(); }, 5 * 60000);
+    return () => { listener.remove(); clearInterval(interval); };
+  }, [userId]);
   useEffect(() => { void useSpaces.getState().refresh().catch(() => {}); }, [userId, appIsActive]);
   const hasHydrated = useStore((state) => state.hasHydrated);
   const addItem = useStore((state) => state.addItem);
@@ -472,7 +533,19 @@ function VoiceReminderApp() {
       const scope = (action: BrainPlan['actions'][number]) => resolveSpace(action, selected, available);
       const snapshot = () => useStore.getState().items;
       const scoped = (action: BrainPlan['actions'][number]) => itemsInSpace(snapshot(), scope(action));
+      const calendarActions = p.actions.filter(a => ((a.tool === 'query' && a.query_kind !== 'search' && a.query_kind !== 'shopping' && a.query_kind !== 'overdue') || a.tool === 'find_free_time' || a.tool === 'create_event' || (a.tool === 'update_item' && a.datetime)) && !scope(a));
+      if (calendarActions.length) {
+        const dates = calendarActions.flatMap(a => [a.datetime, a.end_datetime]).filter((d): d is string => !!d).map(d => Date.parse(d)).filter(Number.isFinite);
+        const start = dates.length ? Math.min(...dates) : Date.now();
+        const end = dates.length ? Math.max(...dates) : Date.now();
+        await ensureCalendarRange(executionUser, new Date(start - 86400000).toISOString(), new Date(end + 2 * 86400000).toISOString());
+        if (useStore.getState().userId !== executionUser) throw new Error('Account changed. Please try again.');
+      }
+      const readable = (action: BrainPlan['actions'][number]) => [...scoped(action), ...externalItems(executionUser, scope(action))];
       validatePlanLinks(p.actions, snapshot(), scope);
+      if (p.actions.some(a => ['update_item', 'delete_item', 'share_item', 'assign_item', 'set_occurrence', 'link_reminder'].includes(a.tool) && a.target_ref?.startsWith('external:'))) {
+        throw new Error(languageRef.current === 'th' ? 'นัดจากปฏิทินที่เชื่อมต่ออ่านได้อย่างเดียว กรุณาแก้ไขในแอปปฏิทินต้นทาง' : 'Connected calendar events are read only. Edit them in the original calendar app.');
+      }
       // Validate every local action before any side effects.
       for (const action of p.actions) {
         if (CREATE_TOOLS.includes(action.tool) || ['query', 'update_item', 'delete_item', 'share_item', 'assign_item', 'set_occurrence', 'find_free_time'].includes(action.tool)) {
@@ -594,15 +667,15 @@ function VoiceReminderApp() {
           assignmentPatch(target, action.assignee_id, action.notify_user_ids, available.find((space) => space.id === scope(action))?.members ?? []);
         }
         if (action.tool === 'set_occurrence') occurrencePatch(scoped(action).find((item) => item.id === action.target_ref)!, action.occurrence_date ?? dateKey(new Date()), action.occurrence_status ?? 'done');
-        if (action.tool === 'find_free_time') freeSlots(scoped(action), new Date(action.datetime ?? ''), new Date(action.end_datetime ?? ''), action.duration_minutes ?? 60);
+        if (action.tool === 'find_free_time') freeSlots(readable(action), new Date(action.datetime ?? ''), new Date(action.end_datetime ?? ''), action.duration_minutes ?? 60);
         if (action.tool === 'set_preference') changeDefaults(usePreferences.getState().personalDefaults[executionUser ?? 'local'] ?? initialDefaults, action.preference_key ?? '', action.preference_value ?? null);
         if (!allowConflicts && (action.tool === 'create_event' || action.tool === 'update_item') && action.datetime) {
           const target = action.tool === 'update_item' ? scoped(action).find((item) => item.id === action.target_ref) : null;
           if (target && target.type !== 'event') continue;
           const from = new Date(action.datetime), until = action.end_datetime ? new Date(action.end_datetime) : new Date(from.getTime() + (action.all_day ? 86400000 : 3600000));
-          if (busySlots(scoped(action).filter((item) => item.id !== target?.id), from, until).length) {
+          if (busySlots(readable(action).filter((item) => item.id !== target?.id), from, until).length) {
             conflictRef.current = { plan: p, text: rawText, userId: executionUser, space: selected };
-            const alternative = freeSlots(scoped(action).filter((item) => item.id !== target?.id), from, new Date(from.getTime() + 86400000), (until.getTime() - from.getTime()) / 60000)[0];
+            const alternative = freeSlots(readable(action).filter((item) => item.id !== target?.id), from, new Date(from.getTime() + 86400000), (until.getTime() - from.getTime()) / 60000)[0];
             const label = alternative ? new Intl.DateTimeFormat(languageRef.current === 'th' ? 'th-TH' : 'en-US', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' }).format(new Date(alternative.start)) : '';
             const question = languageRef.current === 'th' ? `เวลานี้มีนัดอยู่แล้ว ${label ? `ช่วงว่างถัดไปเริ่ม ${label} ` : ''}พูดยืนยันเพื่อนัดซ้อน หรือบอกเวลาใหม่` : `This overlaps an event. ${label ? `The next free slot starts ${label}. ` : ''}Say confirm to keep the overlap, or choose a different time.`;
             setPlan({ ...p, actions: [], speak_back: question, needs_clarification: true, clarify_question: question }); say(question); return;
@@ -696,7 +769,7 @@ function VoiceReminderApp() {
           const result = await searchMemory(queryAction.title || rawText, scoped(queryAction), languageRef.current);
           if (useStore.getState().userId !== executionUser) throw new Error('Account changed. Please ask again.');
           answer = result.answer; setMemorySources(result.sources);
-        } else answer = answerQuery(scoped(queryAction), queryAction, new Date(), languageRef.current);
+        } else answer = answerQuery(readable(queryAction), queryAction, new Date(), languageRef.current);
       }
 
       // ── daily-budget actions (REST bridge) ────────────────────────────────
@@ -730,7 +803,7 @@ function VoiceReminderApp() {
 
       const free = p.actions.find((action) => action.tool === 'find_free_time');
       if (free) {
-        const slots = freeSlots(scoped(free), new Date(free.datetime ?? ''), new Date(free.end_datetime ?? ''), free.duration_minutes ?? 60);
+        const slots = freeSlots(readable(free), new Date(free.datetime ?? ''), new Date(free.end_datetime ?? ''), free.duration_minutes ?? 60);
         const format = (date: string) => new Intl.DateTimeFormat(languageRef.current === 'th' ? 'th-TH' : 'en-US', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' }).format(new Date(date));
         answer = slots.length ? `Available: ${slots.slice(0,5).map((slot) => `${format(slot.start)} – ${format(slot.end)}`).join('; ')}` : 'There are no free slots in that range.';
       }
@@ -757,7 +830,7 @@ function VoiceReminderApp() {
       // Refresh what "อันแรก / อันเมื่อกี้" points at for the next turn.
       let refItems: Item[];
       if (queryAction && queryAction.query_kind !== 'search') {
-        refItems = queryItems(scoped(queryAction), queryAction);
+        refItems = queryItems(readable(queryAction), queryAction);
       } else if (created.length) {
         refItems = created;
       } else {
@@ -815,6 +888,17 @@ function VoiceReminderApp() {
         return;
       }
 
+      const pendingAgent = pendingAgentPlan.current;
+      if (pendingAgent) {
+        pendingAgentPlan.current = null;
+        if (isDeleteCancellation(result.text)) { say('ยกเลิกแล้ว'); return; }
+        if (isDeleteConfirmation(result.text)) {
+          if (Date.now() > pendingAgent.expires || useStore.getState().userId !== pendingAgent.user || (pendingAgent.user ? usePreferences.getState().activeHouseholdId : null) !== pendingAgent.space) { say('ข้อมูลการยืนยันหมดอายุหรือบัญชีเปลี่ยน กรุณาสั่งใหม่'); return; }
+          setThinking(true);
+          void executePlan(pendingAgent.plan, pendingAgent.text).catch(e => setError(String(e))).finally(() => setThinking(false));
+          return;
+        }
+      }
       const currentDefaults = usePreferences.getState().personalDefaults[useStore.getState().userId ?? 'local'] ?? initialDefaults;
       languageRef.current = replyLanguage(currentDefaults.responseLanguage, result.text);
       setMemorySources([]);
@@ -884,7 +968,9 @@ function VoiceReminderApp() {
           const item = useStore.getState().items.find((item) => item.id === ref.ref);
           return { ...ref, label: `${ref.label} [space_id=${item?.household_id ?? 'personal'}]` };
         });
-        return planActions(result.text, new Date(), { ...contextRef.current, inventory, spaces: available.map(({ id, name, aliases }) => ({ id, name, aliases })), selectedSpaceId: requestSpace, language: languageRef.current, defaults: currentDefaults, currentUserId: requestUser, members: available.map((space) => ({ space_id: space.id, members: space.members ?? [] })), capabilities: capabilityAnswer(helpOptionsRef.current, languageRef.current), entities: entityContext(useStore.getState().items.filter((item) => !item.household_id || available.some((space) => space.id === item.household_id)), usePreferences.getState().entityAliases[requestUser ?? 'local']) });
+        return planWithTools(result.text, new Date(), { ...contextRef.current, inventory, spaces: available.map(({ id, name, aliases }) => ({ id, name, aliases })), selectedSpaceId: requestSpace, language: languageRef.current, defaults: currentDefaults, currentUserId: requestUser, members: available.map((space) => ({ space_id: space.id, members: space.members ?? [] })), capabilities: capabilityAnswer(helpOptionsRef.current, languageRef.current), entities: entityContext(useStore.getState().items.filter((item) => !item.household_id || available.some((space) => space.id === item.household_id)), usePreferences.getState().entityAliases[requestUser ?? 'local']) }, () => {
+          if (useStore.getState().userId !== requestUser || (requestUser ? usePreferences.getState().activeHouseholdId : null) !== requestSpace) throw new Error('Account or space changed. Please ask again.');
+        });
       })();
       planning
         .then(async (parsed) => {
@@ -894,7 +980,7 @@ function VoiceReminderApp() {
           const resolvedPlan: BrainPlan = {
             ...parsed,
             actions: parsed.actions.map((action) => {
-              if (action.tool !== 'delete_item') return action;
+              if (action.tool !== 'delete_item' || action.target_ref?.startsWith('external:')) return action;
               const currentItems = itemsInSpace(allItems, resolveSpace(action, requestSpace, available));
               const refExists = currentItems.some((item) => item.id === action.target_ref);
               if (refExists) return action;
@@ -910,6 +996,7 @@ function VoiceReminderApp() {
             return;
           }
 
+          if (resolvedPlan.actions.some(a => ['delete_item', 'update_item', 'share_item', 'assign_item', 'set_occurrence'].includes(a.tool) && a.target_ref?.startsWith('external:'))) throw new Error(languageRef.current === 'th' ? 'นัดจากปฏิทินที่เชื่อมต่ออ่านได้อย่างเดียว กรุณาแก้ไขในแอปปฏิทินต้นทาง' : 'Connected calendar events are read only. Edit them in the original calendar app.');
           const bulkAction = resolvedPlan.actions.find((action) => action.tool === 'delete_items');
           const enumeratedDeletes = resolvedPlan.actions.filter(
             (action) => action.tool === 'delete_item' && !!action.target_ref,
@@ -945,6 +1032,14 @@ function VoiceReminderApp() {
             };
             setPlan({ ...resolvedPlan, speak_back: question, needs_clarification: true, clarify_question: question });
             say(question);
+            return;
+          }
+          if (resolvedPlan.externalDataUsed && resolvedPlan.actions.some(a => !['help', 'query', 'query_budget', 'find_free_time'].includes(a.tool))) {
+            // Do not let untrusted email/tool output trigger mutations without a review.
+            pendingAgentPlan.current = { plan: resolvedPlan, text: result.text, user: requestUser, space: requestSpace, expires: Date.now() + 120000 };
+            const actionLabels: Record<string, string> = { create_reminder: 'ตั้งเตือน', create_event: 'เพิ่มนัด', create_todo: 'เพิ่มงาน', create_note: 'จดโน้ต', record_expense: 'บันทึกรายจ่าย', update_expense: 'แก้รายจ่าย', delete_expense: 'ลบรายจ่าย', update_item: 'แก้รายการ', delete_item: 'ลบรายการ', share_item: 'แชร์รายการ' };
+            const details = resolvedPlan.actions.map(a => `${actionLabels[a.tool] ?? 'ทำรายการ'}: ${a.title}${a.datetime ? ` ${a.datetime}` : ''}${a.amount != null ? ` ${a.amount} บาท` : ''}`).join('; ');
+            say(`แผนจากข้อมูลที่ค้นได้: ${details} พูดยืนยันเพื่อดำเนินการ หรือยกเลิก`);
             return;
           }
           await executePlan(resolvedPlan, result.text);
@@ -1169,7 +1264,8 @@ function VoiceReminderApp() {
             : 'READY FOR COMMAND';
   const visibleItems = itemsInSpace(items, userId ? activeHouseholdId : null).filter((item) => item.id !== pendingDelete?.id);
   const recentItems = visibleItems.slice(0, 3);
-  const dayItems = visibleItems
+  const calendarItems = [...visibleItems, ...(calendarEvents.length ? externalItems(userId, userId ? activeHouseholdId : null) : [])];
+  const dayItems = calendarItems
     .filter((item) => itemCoversDay(item, selectedDate))
     .sort((a, b) => (a.start_at ?? '').localeCompare(b.start_at ?? ''));
 
@@ -1420,10 +1516,11 @@ function VoiceReminderApp() {
                   <Text style={styles.screenSubtitle}>Tap a day to see what's on it</Text>
                 </View>
               </View>
+              {(!userId || !activeHouseholdId) && <CalendarSyncNotice />}
               <CalendarMonth
-                items={visibleItems}
+                items={calendarItems}
                 selectedDate={selectedDate}
-                onSelectDate={setSelectedDate}
+                onSelectDate={(day) => { setSelectedDate(day); void refreshCalendars(defaultRange(new Date(`${day}T12:00:00+07:00`))); }}
               />
               <View style={styles.calendarDayHeading}>
                 <Text style={styles.calendarDayTitle}>{formatDayHeading(selectedDate)}</Text>
@@ -1433,7 +1530,7 @@ function VoiceReminderApp() {
               </View>
               {dayItems.length ? (
                 <View style={styles.itemList}>
-                  {dayItems.map((item) => (
+                  {dayItems.map((item) => (item.externalCalendar ? <ExternalEventRow key={item.id} item={item} /> :
                     <ItemRow
                       key={item.id}
                       item={item}
@@ -1457,19 +1554,114 @@ function VoiceReminderApp() {
 
           {activeTab === 'settings' && (
             <View style={styles.settingsPage}>
-              <Text style={styles.screenTitle}>Settings</Text>
+              {settingsRoute === null ? (
+                <>
+                  <Text style={styles.screenTitle}>Settings</Text>
 
-              <Text style={styles.settingsSection}>Account</Text>
-              <CloudSyncPanel autoOpen={!!pendingHouseholdInviteCode && !userId} />
+                  <View style={styles.settingsGroup}>
+                    <SettingsNavRow
+                      icon="person-circle-outline"
+                      label="Account"
+                      value={userId ? (userEmail || 'Signed in') : 'Not signed in'}
+                      onPress={() => openSettingsRoute('account')}
+                    />
+                    <View style={styles.settingsSep} />
+                    <SettingsNavRow
+                      icon="share-social-outline"
+                      label="Sharing"
+                      value="Shared spaces & members"
+                      onPress={() => openSettingsRoute('sharing')}
+                    />
+                  </View>
 
-              <Text style={styles.settingsSection}>Assistant</Text>
-              <PersonalDefaultsPanel />
+                  <View style={styles.settingsGroup}>
+                    <SettingsNavRow
+                      icon="sparkles-outline"
+                      label="Assistant"
+                      value="Language, reminders, time words"
+                      onPress={() => openSettingsRoute('assistant')}
+                    />
+                    <View style={styles.settingsSep} />
+                    <SettingsNavRow
+                      icon="people-outline"
+                      label="People & places"
+                      value="Names VORA should remember"
+                      onPress={() => openSettingsRoute('people')}
+                    />
+                    <View style={styles.settingsSep} />
+                    <SettingsNavRow
+                      icon="calendar-outline"
+                      label="Calendars"
+                      value="Connected calendars"
+                      onPress={() => openSettingsRoute('calendars')}
+                    />
+                  </View>
 
-              <Text style={styles.settingsSection}>People & places</Text>
-              <KnowledgePanel />
+                  <View style={styles.settingsGroup}>
+                    <SettingsNavRow
+                      icon="notifications-outline"
+                      label="Alerts"
+                      value={defaultAlertMode === 'alarm' ? 'Alarm' : 'Notification'}
+                      onPress={() => openSettingsRoute('alerts')}
+                    />
+                    <View style={styles.settingsSep} />
+                    <SettingsNavRow
+                      icon="mic-outline"
+                      label="Voice"
+                      value={activeEngine?.label ?? 'Voice input'}
+                      onPress={() => openSettingsRoute('voice')}
+                    />
+                  </View>
 
-              <Text style={styles.settingsSection}>Alerts</Text>
-              <View style={styles.settingsGroup}>
+                  <View style={styles.settingsGroup}>
+                    <SettingsNavRow icon="link-outline" label="MCP Connections"
+                      value="เชื่อมต่อบริการให้ VORA" onPress={() => openSettingsRoute('budget')} />
+                  </View>
+                </>
+              ) : (
+                <>
+                  <View style={styles.settingsDetailBar}>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={settingsSubRoute ? 'Back' : 'Back to settings'}
+                      hitSlop={10}
+                      onPress={() => (settingsSubRoute ? setSettingsSubRoute(null) : setSettingsRoute(null))}
+                      style={({ pressed }) => [styles.settingsDetailBack, pressed && styles.pressed]}
+                    >
+                      <Ionicons name="chevron-back" size={24} color={colors.primary} />
+                    </Pressable>
+                    <Text style={styles.settingsDetailTitle}>
+                      {settingsSubRoute
+                        ? settingsRoute === 'calendars'
+                          ? providerNames[settingsSubRoute as Provider]
+                          : settingsSubRoute === 'gmail'
+                            ? 'Gmail'
+                            : 'Daily Budget'
+                        : SETTINGS_TITLES[settingsRoute]}
+                    </Text>
+                  </View>
+
+                  {settingsRoute === 'account' && (
+                    <CloudSyncPanel autoOpen={!!pendingHouseholdInviteCode && !userId} />
+                  )}
+                  {settingsRoute === 'sharing' && (
+                    <HouseholdPanel
+                      key={userId ?? 'local'}
+                      pendingInviteCode={pendingHouseholdInviteCode}
+                      onClearPendingInvite={dismissHouseholdInvite}
+                    />
+                  )}
+                  {settingsRoute === 'calendars' && (
+                    settingsSubRoute
+                      ? <CalendarConnectionsPanel key={`${userId ?? 'local'}-${settingsSubRoute}`} only={settingsSubRoute as Provider} />
+                      : <CalendarProviderMenu onSelect={(provider) => setSettingsSubRoute(provider)} />
+                  )}
+                  {settingsRoute === 'assistant' && <PersonalDefaultsPanel />}
+                  {settingsRoute === 'people' && <KnowledgePanel />}
+
+                  {settingsRoute === 'alerts' && (
+                    <>
+                      <View style={styles.settingsGroup}>
                 <View style={styles.settingsHeaderRow}>
                   <View style={styles.settingsIconTile}>
                     <Ionicons name="notifications" size={18} color={colors.primary} />
@@ -1504,10 +1696,12 @@ function VoiceReminderApp() {
                 </View>
               </View>
 
-              <WebPushPanel />
+                      <WebPushPanel />
+                    </>
+                  )}
 
-              <Text style={styles.settingsSection}>Voice</Text>
-              <View style={styles.settingsGroup}>
+                  {settingsRoute === 'voice' && (
+                    <View style={styles.settingsGroup}>
                 <Pressable
                   accessibilityRole="switch"
                   accessibilityState={{ checked: handsFreeEnabled }}
@@ -1613,71 +1807,20 @@ function VoiceReminderApp() {
                     </View>
                   );
                 })}
-              </View>
-
-              {isBudgetApiConfigured() && (
-                <>
-                  <Text style={styles.settingsSection}>Daily Budget</Text>
-                  <View style={styles.settingsGroup}>
-                    <View style={styles.settingsHeaderRow}>
-                      <View style={styles.settingsIconTile}>
-                        <Ionicons
-                          name={budgetConnected ? 'wallet' : 'wallet-outline'}
-                          size={18}
-                          color={budgetConnected ? colors.primary : colors.textMute}
-                        />
-                      </View>
-                      <View style={styles.settingsRowCopy}>
-                        <Text style={styles.settingsRowLabel}>
-                          {budgetConnected ? 'Connected' : 'Not connected'}
-                        </Text>
-                        <Text style={styles.settingsRowHint}>
-                          {budgetConnected
-                            ? 'Ask about your budget and log expenses by voice'
-                            : 'Link your Daily Budget account to enable budget voice commands'}
-                        </Text>
-                      </View>
                     </View>
-                    <Pressable
-                      accessibilityRole="button"
-                      disabled={budgetBusy}
-                      onPress={budgetConnected ? handleDisconnectBudget : handleConnectBudget}
-                      style={({ pressed }) => [
-                        styles.budgetBtn,
-                        budgetConnected && styles.budgetBtnDisconnect,
-                        pressed && styles.settingsRowPressed,
-                        budgetBusy && styles.settingsRowDisabled,
-                      ]}
-                    >
-                      {budgetBusy ? (
-                        <ActivityIndicator size="small" color={colors.primaryBright} />
-                      ) : (
-                        <>
-                          <Ionicons
-                            name={budgetConnected ? 'unlink-outline' : 'link-outline'}
-                            size={18}
-                            color={budgetConnected ? colors.danger : colors.primaryBright}
-                          />
-                          <Text
-                            style={[
-                              styles.budgetBtnText,
-                              budgetConnected && styles.budgetBtnTextDisconnect,
-                            ]}
-                          >
-                            {budgetConnected ? 'Disconnect' : 'Connect Daily Budget'}
-                          </Text>
-                        </>
-                      )}
-                    </Pressable>
-                  </View>
+                  )}
+
+                  {settingsRoute === 'budget' && (
+                    settingsSubRoute
+                      ? <McpConnectionsPanel
+                          only={settingsSubRoute as McpConnectionId}
+                          connected={budgetConnected} busy={budgetBusy}
+                          onConnect={handleConnectBudget} onDisconnect={handleDisconnectBudget}
+                        />
+                      : <McpConnectionMenu budgetConnected={budgetConnected} onSelect={(id) => setSettingsSubRoute(id)} />
+                  )}
                 </>
               )}
-
-              <Text style={styles.settingsSection}>Sharing</Text>
-              <HouseholdPanel
-                pendingInviteCode={pendingHouseholdInviteCode}
-                onClearPendingInvite={dismissHouseholdInvite}
-              />
             </View>
           )}
         </ScrollView>
@@ -1692,7 +1835,18 @@ function VoiceReminderApp() {
         )}
 
         <SafeAreaView edges={['bottom']} style={styles.bottomSafeArea}>
-          <BottomNav active={activeTab} onChange={setActiveTab} itemCount={visibleItems.length} />
+          <BottomNav
+            active={activeTab}
+            onChange={(tab) => {
+              // Tapping the Settings tab while already there pops back to the list.
+              if (tab === 'settings' && activeTab === 'settings') {
+                setSettingsSubRoute(null);
+                setSettingsRoute(null);
+              }
+              setActiveTab(tab);
+            }}
+            itemCount={visibleItems.length}
+          />
         </SafeAreaView>
         <EditItemModal
           extra={editingItem && <ItemActionsPanel item={items.find((i) => i.id === editingItem.id) ?? editingItem} members={useSpaces.getState().spaces.find((space) => space.id === editingItem.household_id)?.members ?? []}
@@ -1709,6 +1863,39 @@ function VoiceReminderApp() {
         />
       </SafeAreaView>
     </SafeAreaProvider>
+  );
+}
+
+function SettingsNavRow({
+  icon,
+  label,
+  value,
+  onPress,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  value?: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [styles.settingsRow, pressed && styles.settingsRowPressed]}
+    >
+      <View style={styles.settingsIconTile}>
+        <Ionicons name={icon} size={18} color={colors.primary} />
+      </View>
+      <View style={styles.settingsRowCopy}>
+        <Text style={styles.settingsRowLabel}>{label}</Text>
+      </View>
+      {value ? (
+        <Text style={styles.settingsNavValue} numberOfLines={1}>
+          {value}
+        </Text>
+      ) : null}
+      <Ionicons name="chevron-forward" size={18} color={colors.textFaint} />
+    </Pressable>
   );
 }
 
@@ -2630,8 +2817,7 @@ const styles = StyleSheet.create({
   emptyText: { color: colors.textMute, fontSize: font.sm, textAlign: 'center', lineHeight: 20 },
   emptyButton: { marginTop: spacing.md, borderRadius: radius.md, backgroundColor: colors.primaryDark, paddingHorizontal: spacing.xl, paddingVertical: spacing.md },
   emptyButtonText: { color: colors.onPrimary, fontSize: font.sm, fontWeight: '800' },
-  settingsPage: { gap: spacing.xs, paddingBottom: spacing.lg },
-  settingsSection: { color: colors.textMute, fontSize: 12, fontWeight: '700', letterSpacing: 0.8, textTransform: 'uppercase', marginTop: spacing.xl, marginBottom: spacing.sm, marginLeft: spacing.xs },
+  settingsPage: { gap: spacing.md, paddingBottom: spacing.lg },
   settingsGroup: { backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
   settingsRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, minHeight: 60, paddingVertical: spacing.md, paddingHorizontal: spacing.lg },
   settingsRowPressed: { backgroundColor: colors.cardRaised },
@@ -2643,6 +2829,10 @@ const styles = StyleSheet.create({
   settingsRowHint: { color: colors.textMute, fontSize: font.xs, lineHeight: 16 },
   settingsSep: { height: 1, backgroundColor: colors.border, marginLeft: 64 },
   settingsIconTile: { width: 34, height: 34, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
+  settingsNavValue: { color: colors.textMute, fontSize: font.sm, maxWidth: 150, marginRight: 2 },
+  settingsDetailBar: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.md, minHeight: 36 },
+  settingsDetailBack: { marginLeft: -4, padding: 2 },
+  settingsDetailTitle: { color: colors.text, fontSize: font.xl, fontWeight: '900' },
   switchTrack: {
     width: 42, height: 24, borderRadius: 12, padding: 3, justifyContent: 'center',
     backgroundColor: colors.cardRaised, borderWidth: 1, borderColor: colors.borderBright,

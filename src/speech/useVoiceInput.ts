@@ -28,7 +28,7 @@ import {
 import { createWebStt, type WebSttSession } from './webStt';
 import type { SttEngineId, VoiceStatus, TranscriptResult } from './types';
 
-const END_OF_SPEECH_SILENCE_MS = 1_200;
+const END_OF_SPEECH_SILENCE_MS = 800;
 const INITIAL_NO_SPEECH_TIMEOUT_MS = 8_000;
 const MAX_UTTERANCE_MS = 45_000;
 const CLOUD_METER_INTERVAL_MS = 150;
@@ -294,7 +294,7 @@ export function useVoiceInput({
   // Cloud Whisper works on a completed audio file, so unlike the streaming
   // engines it needs a small local voice-activity detector to decide when the
   // user has finished. Calibrate a rolling noise floor, require two loud
-  // samples to count as speech, then stop after 1.2 seconds of silence.
+  // samples to count as speech, then stop after 0.8 seconds of silence.
   useEffect(() => {
     if (!autoStop || engine !== 'cloud' || status !== 'listening') return;
     const timer = setInterval(() => {

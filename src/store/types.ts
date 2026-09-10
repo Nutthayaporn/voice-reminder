@@ -10,6 +10,8 @@ export type ItemType = 'reminder' | 'event' | 'todo' | 'note';
 
 export interface Item {
   id: string;
+  /** Ephemeral read-only view; never persisted in items or scheduled by VORA. */
+  externalCalendar?: { provider: 'google' | 'outlook' | 'apple'; calendarId: string; busy: boolean };
   details?: ItemDetails;
   /** null = personal item; UUID = shared household visible to every member. */
   household_id?: string | null;

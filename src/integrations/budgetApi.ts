@@ -1,3 +1,5 @@
+import { budgetMcpEndpoint } from './mcp/connections';
+import { callBudgetMcp } from './budgetMcp';
 // REST bridge to the sibling `daily-budget` app.
 //
 // Phase 4 upgrade: instead of a one-way deep link, talk to daily-budget's
@@ -77,12 +79,18 @@ async function resolveAuthToken(): Promise<string | null> {
  *  shared token is configured. */
 export async function isBudgetReady(): Promise<boolean> {
   if (!isBudgetApiConfigured()) return false;
-  if (config.budgetApi.token) return true;
+  if (!(await budgetMcpEndpoint()) && config.budgetApi.token) return true;
   return isConnected();
 }
 
 async function call<T>(payload: Record<string, unknown>): Promise<T> {
   if (!isBudgetApiConfigured()) throw new Error('budget_api_not_configured');
+  const mcpEndpoint = await budgetMcpEndpoint();
+  if (mcpEndpoint) {
+    const oauth = await getAccessToken();
+    if (!oauth) throw new Error('Connect your Daily Budget account to use MCP.');
+    return callBudgetMcp<T>(mcpEndpoint, oauth, payload);
+  }
   const token = await resolveAuthToken();
   if (!token) throw new Error('not_connected');
   const res = await fetch(config.budgetApi.url, {
